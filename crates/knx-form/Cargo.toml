@@ -1,0 +1,7 @@
+[package]
+name = "knx-form"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+knx-prod = { path = "../knx-prod" }
