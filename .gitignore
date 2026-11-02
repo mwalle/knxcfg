@@ -1,0 +1,12 @@
+# External reference documents (possibly copyrighted) — never track these.
+refs/
+
+# Rust
+/target/
+
+# Editor/OS noise
+*.swp
+.DS_Store
+
+# Local scratch project used for manual testing
+/test/

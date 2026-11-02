@@ -1,0 +1,10 @@
+[package]
+name = "knx-store"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+knx-core = { path = "../knx-core" }
+serde.workspace = true
+serde_yaml.workspace = true
+anyhow.workspace = true

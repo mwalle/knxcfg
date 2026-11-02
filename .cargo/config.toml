@@ -1,0 +1,7 @@
+# Use Debian-packaged crates exclusively (no network, no crates.io).
+# Requires the matching librust-*-dev packages to be installed via apt.
+[source.crates-io]
+replace-with = "debian"
+
+[source.debian]
+directory = "/usr/share/cargo/registry"
