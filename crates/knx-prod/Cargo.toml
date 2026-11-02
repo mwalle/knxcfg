@@ -1,0 +1,10 @@
+[package]
+name = "knx-prod"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde.workspace = true
+quick-xml = { workspace = true, features = ["serialize"] }
+zip.workspace = true
+anyhow.workspace = true

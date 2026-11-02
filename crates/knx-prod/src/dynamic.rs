@@ -1,0 +1,177 @@
+//! Dynamic UI tree: channels, parameter blocks, visibility conditions.
+//!
+//! The `Dynamic` element describes the *order and visibility* of parameters
+//! (and module instances) in the ETS parameter dialog:
+//!
+//! - `ParameterBlock` groups parameters (title = `Text`).
+//! - `ParameterRefRef` references a `ParameterRef` (→ `Parameter`).
+//! - `ParameterSeparator` is a headline/group separator.
+//! - `choose ParamRefId=…` with `when test=…` children: a `when` is shown
+//!   when the referenced parameter's current value equals `test`; a
+//!   `when default="true"` is the fallback branch.
+//! - `Module` instantiates a `ModuleDef` with `TextArg`/`NumericArg`
+//!   arguments (channel label, base memory offset, …).
+//! - `Assign` sets another parameter's value as a side effect (used by
+//!   value computation, M2; ignored by the visibility walk in M1.5).
+//! - `ComObjectRefRef` shows a group object entry.
+
+use serde::Deserialize;
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Dynamic {
+    #[serde(rename = "$value", default)]
+    pub nodes: Vec<UiNode>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ChannelIndependentBlock {
+    #[serde(rename = "$value", default)]
+    pub nodes: Vec<UiNode>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Channel {
+    #[serde(rename = "@Id", default)]
+    pub id: String,
+    #[serde(rename = "@Name", default)]
+    pub name: String,
+    #[serde(rename = "@Text", default)]
+    pub text: String,
+    #[serde(rename = "@Number", default)]
+    pub number: String,
+    #[serde(rename = "$value", default)]
+    pub nodes: Vec<UiNode>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ParameterBlock {
+    #[serde(rename = "@Id", default)]
+    pub id: String,
+    #[serde(rename = "@Name", default)]
+    pub name: String,
+    #[serde(rename = "@Text", default)]
+    pub text: String,
+    #[serde(rename = "@TextParameterRefId", default)]
+    pub text_parameter_ref_id: String,
+    #[serde(rename = "@Access", default)]
+    pub access: String,
+    #[serde(rename = "$value", default)]
+    pub nodes: Vec<UiNode>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ParameterRefRef {
+    #[serde(rename = "@RefId", default)]
+    pub ref_id: String,
+    #[serde(rename = "@AliasName", default)]
+    pub alias_name: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ParameterSeparator {
+    #[serde(rename = "@Id", default)]
+    pub id: String,
+    #[serde(rename = "@Text", default)]
+    pub text: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Choose {
+    #[serde(rename = "@ParamRefId", default)]
+    pub param_ref_id: String,
+    #[serde(rename = "$value", default)]
+    pub whens: Vec<When>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct When {
+    #[serde(rename = "@test", default)]
+    pub test: String,
+    #[serde(rename = "@default", default)]
+    pub default: String,
+    #[serde(rename = "$value", default)]
+    pub nodes: Vec<UiNode>,
+}
+
+impl When {
+    pub fn is_default(&self) -> bool {
+        self.default == "true"
+    }
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ModuleInstance {
+    #[serde(rename = "@Id", default)]
+    pub id: String,
+    #[serde(rename = "@RefId", default)]
+    pub ref_id: String,
+    #[serde(rename = "@Name", default)]
+    pub name: String,
+    #[serde(rename = "$value", default)]
+    pub args: Vec<Arg>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ComObjectRefRef {
+    #[serde(rename = "@RefId", default)]
+    pub ref_id: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Assign {
+    #[serde(rename = "@TargetParamRefRef", default)]
+    pub target_param_ref_ref: String,
+    #[serde(rename = "@Value", default)]
+    pub value: String,
+    #[serde(rename = "@SourceParamRefRef", default)]
+    pub source_param_ref_ref: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub enum Arg {
+    #[serde(rename = "TextArg")]
+    Text(TextArg),
+    #[serde(rename = "NumericArg")]
+    Numeric(NumericArg),
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct TextArg {
+    #[serde(rename = "@RefId", default)]
+    pub ref_id: String,
+    #[serde(rename = "@Value", default)]
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct NumericArg {
+    #[serde(rename = "@RefId", default)]
+    pub ref_id: String,
+    #[serde(rename = "@Value", default)]
+    pub value: String,
+}
+
+/// A node in the `Dynamic` tree. Unknown element types are ignored.
+#[derive(Debug, Deserialize, Clone)]
+pub enum UiNode {
+    #[serde(rename = "ChannelIndependentBlock")]
+    ChannelIndependentBlock(ChannelIndependentBlock),
+    #[serde(rename = "Channel")]
+    Channel(Channel),
+    #[serde(rename = "ParameterBlock")]
+    ParameterBlock(ParameterBlock),
+    #[serde(rename = "ParameterRefRef")]
+    ParameterRefRef(ParameterRefRef),
+    #[serde(rename = "ParameterSeparator")]
+    ParameterSeparator(ParameterSeparator),
+    #[serde(rename = "choose")]
+    Choose(Choose),
+    #[serde(rename = "Module")]
+    Module(ModuleInstance),
+    #[serde(rename = "ComObjectRefRef")]
+    ComObjectRefRef(ComObjectRefRef),
+    #[serde(rename = "Assign")]
+    Assign(Assign),
+    #[serde(other)]
+    Other,
+}
