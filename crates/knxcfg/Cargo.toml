@@ -1,0 +1,20 @@
+[package]
+name = "knxcfg"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "knxcfg"
+path = "src/main.rs"
+
+[dependencies]
+knx-core = { path = "../knx-core" }
+knx-store = { path = "../knx-store" }
+knx-prod = { path = "../knx-prod" }
+knx-transport = { path = "../knx-transport" }
+knx-form = { path = "../knx-form" }
+clap.workspace = true
+anyhow.workspace = true
+serde_yaml.workspace = true
+ratatui = "0.28"
+crossterm = "0.27"
