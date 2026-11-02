@@ -141,6 +141,16 @@ pub struct Static {
     /// `<ComObjectTable>`.
     #[serde(rename = "ComObjects", default)]
     pub com_objects: Option<ComObjects>,
+    /// The `<Code>` element: memory segments (application code, parameter
+    /// image, group-object/address/association tables).
+    #[serde(rename = "Code", default)]
+    pub code: Option<Code>,
+    /// Header of the group-address table (entries are written at download).
+    #[serde(rename = "AddressTable", default)]
+    pub address_table: Option<Table>,
+    /// Header of the association table (entries are written at download).
+    #[serde(rename = "AssociationTable", default)]
+    pub association_table: Option<Table>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -369,6 +379,10 @@ pub struct Memory {
     pub offset: String,
     #[serde(rename = "@BitOffset", default)]
     pub bit_offset: String,
+    /// Module parameters are relative to a module argument (`BaseOffset`);
+    /// device parameters have no `BaseOffset`.
+    #[serde(rename = "@BaseOffset", default)]
+    pub base_offset: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -409,6 +423,86 @@ pub struct ComObject {
     pub read_on_init_flag: String,
     #[serde(rename = "@DatapointType", default)]
     pub datapoint_type: String,
+}
+
+/// The `<Code>` element: a set of memory segments. Each segment is either an
+/// `AbsoluteSegment` (fixed device address) or a `RelativeSegment` (relative
+/// to a load state machine); both carry an optional base64 `<Data>` template.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Code {
+    #[serde(rename = "AbsoluteSegment", default)]
+    pub absolute: Vec<Segment>,
+    #[serde(rename = "RelativeSegment", default)]
+    pub relative: Vec<Segment>,
+}
+
+impl Code {
+    /// All segments, absolute first.
+    pub fn segments(&self) -> impl Iterator<Item = &Segment> {
+        self.absolute.iter().chain(self.relative.iter())
+    }
+
+    pub fn by_id(&self, id: &str) -> Option<&Segment> {
+        self.segments().find(|s| s.id == id)
+    }
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Segment {
+    #[serde(rename = "@Id", default)]
+    pub id: String,
+    #[serde(rename = "@Size", default)]
+    pub size: String,
+    /// Absolute segment only: fixed device address.
+    #[serde(rename = "@Address", default)]
+    pub address: String,
+    /// Absolute segment only: e.g. `EEPROM`, `RAM`, or absent (flash).
+    #[serde(rename = "@MemoryType", default)]
+    pub memory_type: String,
+    /// Relative segment only.
+    #[serde(rename = "@LoadStateMachine", default)]
+    pub load_state_machine: String,
+    /// Relative segment only.
+    #[serde(rename = "@Offset", default)]
+    pub offset: String,
+    /// base64 template; empty when the segment has no `<Data>`.
+    #[serde(rename = "Data", default)]
+    pub data: Option<String>,
+}
+
+impl Segment {
+    pub fn size_bytes(&self) -> usize {
+        self.size.parse().unwrap_or(0)
+    }
+
+    /// Decode the base64 `<Data>`, zero-filling to `@Size` if needed.
+    pub fn decoded_data(&self) -> Vec<u8> {
+        use base64::Engine;
+        let mut bytes = self
+            .data
+            .as_deref()
+            .map(|s| {
+                let compact: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+                base64::engine::general_purpose::STANDARD
+                    .decode(compact)
+                    .unwrap_or_default()
+            })
+            .unwrap_or_default();
+        bytes.resize(self.size_bytes(), 0);
+        bytes
+    }
+}
+
+/// Header of the group-address table or the association table. The entries
+/// themselves are empty in knxprod and are filled at download time.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Table {
+    #[serde(rename = "@CodeSegment", default)]
+    pub code_segment: String,
+    #[serde(rename = "@Offset", default)]
+    pub offset: String,
+    #[serde(rename = "@MaxEntries", default)]
+    pub max_entries: String,
 }
 
 /// Strip a UTF-8 BOM if present (some knxprod files start with one).

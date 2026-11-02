@@ -16,17 +16,20 @@ mod app;
 mod catalog;
 mod dynamic;
 mod hardware;
+pub mod memory;
 
 use anyhow::{anyhow, Context, Result};
 use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub use app::{
-    ApplicationProgram, Argument, Arguments, ComObject, ComObjects, ComObjectTable, Enumeration,
-    Language, Languages, Memory, ModuleDef, ModuleDefs, ParamNode, Parameter, ParameterRef,
-    ParameterRefs, ParameterType, ParameterTypes, Parameters, Static, Translation,
-    TranslationElement, TranslationUnit, TypeNumber, TypeRestriction, TypeText, Union,
+    ApplicationProgram, Argument, Arguments, Code, ComObject, ComObjects, ComObjectTable,
+    Enumeration, Language, Languages, Memory, ModuleDef, ModuleDefs, ParamNode, Parameter,
+    ParameterRef, ParameterRefs, ParameterType, ParameterTypes, Parameters, Segment, Static,
+    Table, Translation, TranslationElement, TranslationUnit, TypeNumber, TypeRestriction,
+    TypeText, Union,
 };
+pub use memory::{build_parameter_image, check_template, MemoryImage, Placement, SegmentImage};
 pub use dynamic::{
     Arg, Assign, Channel, ChannelIndependentBlock, Choose, ComObjectRefRef, Dynamic,
     ModuleInstance, NumericArg, ParameterBlock, ParameterRefRef, ParameterSeparator, TextArg,

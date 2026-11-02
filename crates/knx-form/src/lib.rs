@@ -48,7 +48,7 @@ pub struct FormField {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum FieldKind {
-    Checkbox { off: String, on: String },
+    Checkbox { off: EnumOption, on: EnumOption },
     Enum { options: Vec<EnumOption> },
     Number { min: Option<String>, max: Option<String>, unit: Option<String> },
     Text,
@@ -490,8 +490,8 @@ fn field_kind(
             .collect();
         if r.size_in_bit == "1" && options.len() == 2 {
             return FieldKind::Checkbox {
-                off: options[0].value.clone(),
-                on: options[1].value.clone(),
+                off: options[0].clone(),
+                on: options[1].clone(),
             };
         }
         return FieldKind::Enum { options };
@@ -536,7 +536,10 @@ mod tests {
         };
         assert_eq!(
             field_kind(Some(&pt), "", &HashMap::new()),
-            FieldKind::Checkbox { off: "0".into(), on: "1".into() }
+            FieldKind::Checkbox {
+                off: EnumOption { value: "0".into(), label: "no".into() },
+                on: EnumOption { value: "1".into(), label: "yes".into() },
+            }
         );
     }
 }

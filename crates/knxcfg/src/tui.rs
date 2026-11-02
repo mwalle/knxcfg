@@ -199,7 +199,7 @@ fn run_loop(
                 let current = values.get(&id).cloned().unwrap_or_else(|| value.clone());
                 match kind {
                     FieldKind::Checkbox { off, on } => {
-                        let next = if current == on { off } else { on };
+                        let next = if current == on.value { off.value.clone() } else { on.value.clone() };
                         values.insert(id.clone(), next);
                         pages = evaluate(ap, values, lang);
                         restore_cursor(&pages, *page_index, cursor, &id);
@@ -363,6 +363,15 @@ fn render_row(row: &Row) -> ListItem<'static> {
         ))),
         Row::Field { label, kind, value, enabled, .. } => {
             let shown = match kind {
+                FieldKind::Checkbox { off, on } => {
+                    if *value == on.value {
+                        format!("[x] {}", on.label)
+                    } else if *value == off.value {
+                        format!("[ ] {}", off.label)
+                    } else {
+                        format!("[?] {value}")
+                    }
+                }
                 FieldKind::Enum { options } => options
                     .iter()
                     .find(|o| o.value == *value)

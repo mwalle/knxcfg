@@ -40,6 +40,12 @@ enum Cmd {
         /// Hardware2ProgramRefId
         h2p: String,
     },
+    /// Build the device memory image from the knxprod defaults (M5)
+    Memory {
+        file: PathBuf,
+        /// Hardware2ProgramRefId
+        h2p: String,
+    },
     /// Add a device from a knxprod to the topology
     Add {
         knxprod: PathBuf,
@@ -106,6 +112,7 @@ fn main() -> Result<()> {
         Cmd::Catalog { file } => cmd_catalog(&file),
         Cmd::Probe { file, h2p } => cmd_probe(&file, &h2p),
         Cmd::Form { file, h2p } => cmd_form(&file, &h2p),
+        Cmd::Memory { file, h2p } => cmd_memory(&file, &h2p),
         Cmd::Add { knxprod, h2p, ia, name } => {
             let dir = resolve_project(project.as_deref())?;
             cmd_add(&dir, &knxprod, &h2p, &ia, name.as_deref())
@@ -358,7 +365,9 @@ fn cmd_form(file: &PathBuf, h2p: &str) -> Result<()> {
             }
             for field in &section.fields {
             let kind = match &field.kind {
-                knx_form::FieldKind::Checkbox { .. } => "bool".to_string(),
+                knx_form::FieldKind::Checkbox { off, on } => {
+                    format!("bool [{}|{}]", off.label, on.label)
+                }
                 knx_form::FieldKind::Enum { options } => {
                     let labels: Vec<&str> = options.iter().map(|o| o.label.as_str()).collect();
                     format!("enum [{}]", labels.join("|"))
@@ -377,8 +386,82 @@ fn cmd_form(file: &PathBuf, h2p: &str) -> Result<()> {
                 }
                 knx_form::FieldKind::Text => "text".to_string(),
             };
-            println!("    {:<60} {:<24} = {}", field.label, kind, field.value);
+            let value = match &field.kind {
+                knx_form::FieldKind::Checkbox { off, on } => {
+                    if field.value == on.value {
+                        on.label.clone()
+                    } else if field.value == off.value {
+                        off.label.clone()
+                    } else {
+                        field.value.clone()
+                    }
+                }
+                _ => field.value.clone(),
+            };
+            println!("    {:<60} {:<24} = {}", field.label, kind, value);
             }
+        }
+    }
+    Ok(())
+}
+
+fn cmd_memory(file: &PathBuf, h2p: &str) -> Result<()> {
+    use std::collections::HashMap;
+
+    let knxprod = knx_prod::KnxProd::open(file)
+        .with_context(|| format!("reading {}", file.display()))?;
+    let ap = knxprod
+        .application_program(h2p)
+        .with_context(|| format!("resolving {h2p}"))?;
+
+    let values: HashMap<String, String> = HashMap::new();
+    let image = knx_prod::build_parameter_image(&ap, &values)?;
+
+    println!("Memory image: {} ({} segment(s))", ap.name, image.segments.len());
+    for seg in &image.segments {
+        let addr = if seg.address.is_empty() {
+            "-".to_string()
+        } else {
+            format!("0x{:04x}", seg.address.parse::<u32>().unwrap_or(0))
+        };
+        let mem = if seg.memory_type.is_empty() { "flash" } else { &seg.memory_type };
+        println!(
+            "  {:<44} {}  {:>5} bytes  {}",
+            seg.id, addr, seg.size, mem
+        );
+    }
+
+    println!("\nParameter placements ({}):", image.placements.len());
+    for p in &image.placements {
+        println!(
+            "  {:<40} {:<40} byte {:<4} bit {:<2} {} bit = {}",
+            p.param_id, p.segment_id, p.offset, p.bit_offset, p.bit_len, p.value
+        );
+    }
+
+    let mismatches = knx_prod::check_template(&ap)?;
+    if mismatches.is_empty() {
+        println!("\nTemplate check: all defaults match the shipped segment template.");
+    } else {
+        println!("\nTemplate check: {} default(s) differ from the shipped template:", mismatches.len());
+        for m in &mismatches {
+            println!("  - {m}");
+        }
+    }
+
+    // Hex dump of the segments that carry parameters.
+    let mut dumped: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for p in &image.placements {
+        dumped.insert(p.segment_id.as_str());
+    }
+    for seg in &image.segments {
+        if !dumped.contains(seg.id.as_str()) {
+            continue;
+        }
+        println!("\n--- {} ({}) ---", seg.id, seg.memory_type);
+        for (i, chunk) in seg.data.chunks(16).enumerate() {
+            let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+            println!("  {:04x}  {}", i * 16, hex.join(" "));
         }
     }
     Ok(())

@@ -35,6 +35,9 @@ D13 record knxprod path per device at `add` time.
 - `knx-prod` — knxprod parser: catalog, hardware (h2p→app), application
   program (parameter types/params/unions, group objects, module defs),
   `Dynamic` tree (pages/`choose`/`when`/`Module`), `<Languages>` translations.
+  M5: `<Code>` segments (absolute/relative, base64→bytes), `Memory/@BaseOffset`,
+  `AddressTable`/`AssociationTable` headers, and `build_parameter_image` +
+  `check_template` (device-level parameter overlay + template self-check).
 - `knx-form` — form engine: `evaluate(ap, values, lang) -> Vec<FormPage>`
   (`FormPage { title, sections }`; `FormField { id, label, kind, value,
   enabled }`; `FieldKind::{Checkbox, Enum, Number, Text}`). Resolves
@@ -58,6 +61,7 @@ knxcfg link <ia> <object> <ga>                 unlink <ia> <object> <ga>
 knxcfg device-set <ia> <param-id> <value>
 knxcfg edit <ia> [--knxprod <file>]            # TUI: Tab=pages, Enter=edit, s=save, q=quit
 knxcfg catalog <knxprod> | probe <knxprod> <h2p> | form <knxprod> <h2p>
+knxcfg memory <knxprod> <h2p>                    # M5: segments, placements, template check
 ```
 `add` auto-creates Area/Line from the IA and records the canonical knxprod
 path in `DeviceRef.knxprod` (absolute — known portability tradeoff).
@@ -65,9 +69,13 @@ path in `DeviceRef.knxprod` (absolute — known portability tradeoff).
 ## Milestones
 Done: M0 skeleton · M1 knxprod parser · M1.5 form engine · M1.6 project
 editing + TUI (incl. translations, access filtering, pages).
+In progress: **M5** memory-image builder — code segments + device-parameter
+overlay + template self-check done (`knxcfg memory`); remaining: module
+`BaseOffset` instantiation, GO/address/association table entries, download,
+read-back, byte-identity vs ETS.
 Next: **M2** `.knxproj` import (clean-room RE) · **M3** `.knxproj` export ·
-**M4** USB cEMI transport (`09_03 §3`) · **M5** memory-image builder + download
-(byte-identical to ETS as oracle) · **M6** hardening.
+**M4** USB cEMI transport (`09_03 §3`) · rest of **M5** (download + read-back,
+byte-identical to ETS as oracle) · **M6** hardening.
 
 ## Known loose ends
 - GO linking uses `object_number` only; module GO identity needs the

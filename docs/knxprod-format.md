@@ -112,7 +112,28 @@ Form-engine rules (`crates/knx-form`):
 
 Not yet parsed (download builder, M2/M5):
 
-- `AddressTable` / `AssociationTable` / `LoadProcedures` contents.
-- `Code` segments (`AbsoluteSegment`/`RelativeSegment` base64 data).
-- `Assign` value computation (M2) and full module memory-offset
-  instantiation (M5). The M1.5 form walk treats `Assign` as a no-op.
+- `LoadProcedures` contents (load-sequence ops).
+- `Assign` value computation (M2).
+- Full module memory-offset instantiation via `Memory/@BaseOffset` (M5).
+- Building the group-object / address / association table **entries** (the
+  table headers are parsed; entries are empty in knxprod and written at
+  download time).
+
+### M5 memory image (in progress)
+
+`knx-prod` now parses the `<Code>` segments (`AbsoluteSegment` and
+`RelativeSegment`, with base64 `<Data>` decoded to bytes), `Memory/@BaseOffset`,
+and the `AddressTable`/`AssociationTable` headers (`CodeSegment`, `Offset`,
+`MaxEntries`). `knx_prod::build_parameter_image` overlays device-level
+parameter values onto the segment templates (MSB-first within a byte,
+big-endian across bytes — assumption to confirm against ETS5).
+
+`knxcfg memory <knxprod> <h2p>` prints the segment map, the parameter
+placements, a hex dump of the parameter segments, and a template self-check.
+The self-check compares the freshly-encoded knxprod defaults against the
+shipped template; on the MDT Universal Interface it reports that the non-zero
+`Value` defaults (e.g. `startupTimeout` value `2` at byte 0 vs template
+`0x0000`, `DebounceTime` `30` vs `0x32`) do **not** round-trip through the
+shipped segment template. This is the concrete M5 work list to resolve
+against the ETS5 oracle (value encoding, `Assign` computation, scaling, or a
+stale template in the knxprod).

@@ -157,7 +157,12 @@ The bus/protocol layer is fully specified by the KNX system specifications
 XML schema (XSD) ships with the KNX Manufacturer Tool, not these PDFs;
 `.knxproj` is ETS-proprietary (see `docs/spec-index.md`).
 
-## 9. Commissioning / download flow
+## 9. Commissioning / download & read-back flow
+
+"Download" = project → device (write). "Read-back" (upload) = device →
+project (read) — the inverse direction.
+
+### Download (project → device)
 
 1. Resolve device → knxprod application program.
 2. Build parameter memory image (parameter block layout from knxprod).
@@ -167,8 +172,28 @@ XML schema (XSD) ships with the KNX Manufacturer Tool, not these PDFs;
 5. Download via management procedures (with verify = read-back).
 6. Optionally: program IA first, then restart.
 
+### Read-back (device → project)
+
+Read the current configuration out of a device and turn it back into our
+YAML project files — the inverse of the download builder.
+
+1. Resolve device → knxprod application program (same as download).
+2. Read the raw memory image via management procedures (`Memory_Read` over
+   the load procedure / address map).
+3. Decode the parameter blocks into `devices/<ia>.yaml` `parameters`
+   (symbolic id + value) using the knxprod parameter layout (`<Memory>`
+   offsets) — the inverse of step 2 of download.
+4. Decode the group-object table, address table, and association table into
+   GO links (`object_number` → GA), reusing the M5 association-table work.
+5. Store the result: merge discovered GAs into `groups.yaml`, write the
+   device instance to `devices/<ia>.yaml` (deterministic ordering, no
+   opaque state).
+6. Double-duty: this is the read-back half of the M5 verify step and the
+   seed for a later "adopt an already-commissioned device" workflow.
+
 Long-term correctness bar: byte-identical memory image to ETS for the same
-project+device. That is our test oracle.
+project+device (download), and read-back that re-downloads to the same
+image. That is our test oracle.
 
 ## 10. Clean-room reverse engineering process
 
@@ -218,8 +243,11 @@ Ground rules:
 6. **M4 — Transport**: USB cEMI tunnel (`09_03 §3 KNX USB Interface`), cEMI,
    management procedures. Able to read device descriptor + memory from a
    real device.
-7. **M5 — Download**: build + write parameter/GO/address memory image,
-   verify by read-back. Oracle test vs ETS (same project → same bytes).
+7. **M5 — Download + read-back**: build + write parameter/GO/address memory
+   image, verify by read-back. Oracle test vs ETS (same project → same
+   bytes). Read-back: read a device's memory, decode parameters, GO table
+   and address/association table, and store them in our YAML project files
+   (inverse of the download builder).
 8. **M6 — Hardening**: IA programming, restart handling, error recovery,
    multiple transports, CI with captures.
 
