@@ -41,12 +41,13 @@ pub use app::{
 };
 pub use device_image::{
     build_device_image, download_plan, read_back_device, DeviceConfiguration, DeviceImage,
-    DownloadStep, TablePlacement,
+    DownloadKind, DownloadStep, TableImage, TablePlacement,
 };
 pub use eval::Evaluation;
 pub use master::{DatapointSubtype, DatapointType, MasterData, MaskProcedure, MaskVersion};
 pub use memory::{
-    build_parameter_image, check_template, parameter_defaults, MemoryImage, Placement, SegmentImage,
+    build_parameter_image, build_parameter_image_eval, check_template, validate_value,
+    MemoryImage, Placement, SegmentImage,
 };
 pub use dynamic::{
     Arg, Assign, Channel, ChannelIndependentBlock, Choose, ComObjectRefRef, Dynamic,

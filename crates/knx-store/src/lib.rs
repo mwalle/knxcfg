@@ -159,6 +159,7 @@ mod tests {
             links: vec![GroupObjectLink {
                 object_number: 1,
                 ga: "1/2/3".parse().unwrap(),
+                send: true,
             }],
         });
 

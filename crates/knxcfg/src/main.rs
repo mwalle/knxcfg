@@ -105,7 +105,13 @@ enum Cmd {
         ia: String,
         /// Group object number
         object: u16,
+        /// Group address (3-level 1/2/3, 2-level 1/515 or raw 2563)
         ga: String,
+        /// Make this the address the object transmits on
+        #[arg(long)]
+        send: bool,
+        #[arg(long)]
+        knxprod: Option<PathBuf>,
     },
     /// Remove a link
     Unlink {
@@ -113,12 +119,14 @@ enum Cmd {
         object: u16,
         ga: String,
     },
-    /// Set a device parameter value
+    /// Set a device parameter value (validated against the knxprod)
     DeviceSet {
         ia: String,
-        /// Parameter id (or `module-id/param-id` for module parameters)
+        /// Parameter id (`P-3`) or `module-instance/param` (`MD-2_M-2/MD-2_P-26`)
         param: String,
         value: String,
+        #[arg(long)]
+        knxprod: Option<PathBuf>,
     },
     /// Interactively edit a device's parameters (TUI)
     Edit {
@@ -138,6 +146,9 @@ enum Cmd {
         /// knxprod file (defaults to the one recorded at `add` time)
         #[arg(long)]
         knxprod: Option<PathBuf>,
+        /// Parameters only (partial download; MergedProcedure applications)
+        #[arg(long)]
+        partial: bool,
     },
 }
 
@@ -212,17 +223,17 @@ fn main() -> Result<()> {
             let dir = resolve_project(project.as_deref())?;
             cmd_group_rm(&dir, &ga, force)
         }
-        Cmd::Link { ia, object, ga } => {
+        Cmd::Link { ia, object, ga, send, knxprod } => {
             let dir = resolve_project(project.as_deref())?;
-            cmd_link(&dir, &ia, object, &ga)
+            cmd_link(&dir, &ia, object, &ga, send, knxprod.as_deref())
         }
         Cmd::Unlink { ia, object, ga } => {
             let dir = resolve_project(project.as_deref())?;
             cmd_unlink(&dir, &ia, object, &ga)
         }
-        Cmd::DeviceSet { ia, param, value } => {
+        Cmd::DeviceSet { ia, param, value, knxprod } => {
             let dir = resolve_project(project.as_deref())?;
-            cmd_device_set(&dir, &ia, &param, &value)
+            cmd_device_set(&dir, &ia, &param, &value, knxprod.as_deref())
         }
         Cmd::Edit { ia, knxprod } => {
             let dir = resolve_project(project.as_deref())?;
@@ -230,9 +241,9 @@ fn main() -> Result<()> {
         }
         Cmd::Export => bail!("`export` is not implemented yet (M3)"),
         Cmd::Import { .. } => bail!("`import` is not implemented yet (M2)"),
-        Cmd::Download { ia, knxprod } => {
+        Cmd::Download { ia, knxprod, partial } => {
             let dir = resolve_project(project.as_deref())?;
-            cmd_download(&dir, &ia, knxprod.as_deref())
+            cmd_download(&dir, &ia, knxprod.as_deref(), partial)
         }
     }
 }
@@ -320,6 +331,14 @@ fn cmd_list(dir: &Path) -> Result<()> {
             dev.parameters.len(),
             dev.links.len()
         );
+        for l in &dev.links {
+            println!(
+                "    #{:<4} -> {}{}",
+                l.object_number,
+                l.ga,
+                if l.send { "  (sending)" } else { "" }
+            );
+        }
     }
     Ok(())
 }
@@ -550,20 +569,18 @@ fn cmd_memory(file: &PathBuf, h2p: &str) -> Result<()> {
         .application_program(h2p)
         .with_context(|| format!("resolving {h2p}"))?;
 
-    let values: HashMap<String, String> = HashMap::new();
-    let image = knx_prod::build_parameter_image(&ap, &values)?;
+    let ev = knx_prod::Evaluation::new(&ap, &HashMap::new());
+    print_warnings(&ev.warnings);
+    let image = knx_prod::build_parameter_image_eval(&ev)?;
 
     println!("Memory image: {} ({} segment(s))", ap.name, image.segments.len());
     for seg in &image.segments {
-        let addr = if seg.address.is_empty() {
-            "-".to_string()
-        } else {
-            format!("0x{:04x}", seg.address.parse::<u32>().unwrap_or(0))
-        };
-        let mem = if seg.memory_type.is_empty() { "flash" } else { &seg.memory_type };
         println!(
             "  {:<44} {}  {:>5} bytes  {}",
-            seg.id, addr, seg.size, mem
+            seg.id,
+            segment_address(seg),
+            seg.size,
+            segment_memory(seg)
         );
     }
 
@@ -571,33 +588,38 @@ fn cmd_memory(file: &PathBuf, h2p: &str) -> Result<()> {
     for p in &image.placements {
         println!(
             "  {:<40} {:<40} byte {:<4} bit {:<2} {} bit = {}",
-            p.param_id, p.segment_id, p.offset, p.bit_offset, p.bit_len, p.value
+            knx_prod::eval::short_key(&ap, &p.param_id),
+            p.segment_id,
+            p.offset,
+            p.bit_offset,
+            p.bit_len,
+            p.value
         );
     }
 
+    // The template is the manufacturer's factory image; ETS overwrites every
+    // parameter position, so differences are informational.
     let mismatches = knx_prod::check_template(&ap)?;
     if mismatches.is_empty() {
-        println!("\nTemplate check: all defaults match the shipped segment template.");
+        println!("\nThe default parameters encode to exactly the shipped segment template.");
     } else {
-        println!("\nTemplate check: {} default(s) differ from the shipped template:", mismatches.len());
+        println!(
+            "\n{} default placement(s) differ from the shipped segment template \
+             (informational: the template is the factory image, ETS overwrites it):",
+            mismatches.len()
+        );
         for m in &mismatches {
             println!("  - {m}");
         }
     }
 
     // Hex dump of the segments that carry parameters.
-    let mut dumped: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for p in &image.placements {
-        dumped.insert(p.segment_id.as_str());
-    }
+    let dumped: std::collections::HashSet<&str> =
+        image.placements.iter().map(|p| p.segment_id.as_str()).collect();
     for seg in &image.segments {
-        if !dumped.contains(seg.id.as_str()) {
-            continue;
-        }
-        println!("\n--- {} ({}) ---", seg.id, seg.memory_type);
-        for (i, chunk) in seg.data.chunks(16).enumerate() {
-            let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-            println!("  {:04x}  {}", i * 16, hex.join(" "));
+        if dumped.contains(seg.id.as_str()) {
+            println!("\n--- {} ({}) ---", seg.id, segment_memory(seg));
+            hex_dump(&seg.data);
         }
     }
     Ok(())
@@ -614,12 +636,10 @@ fn all_com_objects(s: &knx_prod::Static) -> Vec<knx_prod::ComObject> {
     out
 }
 
-/// Dump the group address / association / group object tables (M5).
-///
-/// Uses the knxprod group objects only (no project links), so the address and
-/// association tables are empty; the group object table shows the device's
-/// *visible* group objects as they would be encoded, with flags overlaid onto
-/// the shipped knxprod GoT template (data pointers preserved).
+/// Dump the group address / association / group object tables (M5) for the
+/// knxprod defaults and no links: the address and association tables are
+/// empty, and every active object has its communication flag cleared (an
+/// unlinked object cannot communicate).
 fn cmd_tables(file: &PathBuf, h2p: &str) -> Result<()> {
     use std::collections::HashMap;
 
@@ -629,254 +649,162 @@ fn cmd_tables(file: &PathBuf, h2p: &str) -> Result<()> {
         .application_program(h2p)
         .with_context(|| format!("resolving {h2p}"))?;
 
-    let values = HashMap::new();
-    let objects = knx_prod::tables::active_group_objects(&ap, &values);
-    println!("{}: {} visible group object(s)", ap.name, objects.len());
-
-    let got = if let Some(t) = ap
-        .static_
-        .as_ref()
-        .and_then(|s| s.com_object_table.as_ref())
-    {
-        if let Some(seg) = ap
-            .static_
-            .as_ref()
-            .and_then(|s| s.code.as_ref())
-            .and_then(|c| c.by_id(&t.code_segment))
-        {
-            let offset = t.offset.parse::<usize>().unwrap_or(0);
-            let template = seg.decoded_data();
-            // No project links here: every visible object is unlinked, so
-            // ETS would clear its communication bit.
-            let flags: HashMap<u16, u8> = objects
-                .iter()
-                .map(|(asap, obj)| {
-                    let slot_flags = template
-                        .get(offset + (*asap as usize + 1) * 4 + 1)
-                        .copied()
-                        .unwrap_or(0);
-                    (
-                        *asap,
-                        knx_prod::tables::visible_group_object_flags(
-                            obj.flags,
-                            slot_flags,
-                            false,
-                        ),
-                    )
-                })
-                .collect();
-            knx_prod::tables::overlay_group_object_table_at(&template, offset, &flags)
-        } else {
-            let descriptors: Vec<knx_prod::tables::GroupObject> =
-                objects.iter().map(|(_, o)| o.clone()).collect();
-            knx_prod::tables::build_group_object_table(&descriptors)
+    let image = knx_prod::build_device_image(&ap, &HashMap::new(), &[])?;
+    print_warnings(&image.warnings);
+    println!(
+        "{}: {} active group object(s), {:?} tables",
+        ap.name,
+        image.active_group_objects.len(),
+        image.format
+    );
+    for (name, t) in [
+        ("Group Address Table", &image.address_table),
+        ("Association Table", &image.association_table),
+        ("Group Object Table", &image.group_object_table),
+    ] {
+        match &t.placement {
+            Some(p) => println!(
+                "\n{name} ({} bytes at {}+{}):",
+                t.bytes.len(),
+                p.segment_id,
+                p.offset
+            ),
+            None => println!("\n{name} ({} bytes, loaded through its table object):", t.bytes.len()),
         }
-    } else {
-        let descriptors: Vec<knx_prod::tables::GroupObject> =
-            objects.iter().map(|(_, o)| o.clone()).collect();
-        knx_prod::tables::build_group_object_table(&descriptors)
-    };
-
-    println!("\nGroup Object Table ({} bytes):", got.len());
-    for (i, chunk) in got.chunks(16).enumerate() {
-        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-        println!("  {:04x}  {}", i * 16, hex.join(" "));
+        hex_dump(&t.bytes);
     }
 
-    println!("\nASAP numbering (visible module instances):");
-    for (asap, obj) in &objects {
-        println!(
-            "  #{:<4} flags={:02x} vft={}",
-            asap,
-            knx_prod::tables::go_descriptor_high(obj.flags),
-            obj.value_field_type
-        );
-    }
+    println!("\nActive group objects:");
+    print_group_objects(&image.active_group_objects);
     Ok(())
 }
 
 /// Build the full device download image and print the plan (M5 dry run).
 ///
 /// The actual bus transfer (`A_Memory_Write` + load-control sequence over the
-/// USB cEMI tunnel) is M4 transport work; until then this exercises and
-/// displays the complete memory image the download path will send.
-fn cmd_download(dir: &Path, ia_str: &str, knxprod_override: Option<&Path>) -> Result<()> {
-    use std::collections::HashMap;
-
+/// USB cEMI tunnel) is M4 transport work; until then this builds and displays
+/// everything the download will send.
+fn cmd_download(
+    dir: &Path,
+    ia_str: &str,
+    knxprod_override: Option<&Path>,
+    partial: bool,
+) -> Result<()> {
     let ia: IndividualAddress = ia_str.parse().with_context(|| format!("invalid IA {ia_str}"))?;
     let project = knx_store::load(dir)?;
+    let device = open_device(dir, &project, ia, knxprod_override)?;
+    let ap = &device.ap;
 
-    let device_ref = project
-        .topology
-        .iter()
-        .flat_map(|a| a.lines.iter())
-        .flat_map(|l| l.devices.iter())
-        .find(|d| d.ia == ia)
-        .ok_or_else(|| anyhow::anyhow!("device {ia} not found in topology"))?;
-    let h2p = device_ref.hardware.clone();
-    let knxprod_path = product_store::resolve(
-        &h2p,
-        Some(dir),
-        device_ref.knxprod.as_deref().map(Path::new),
-        knxprod_override,
-    )?;
-
-    let kp = knx_prod::KnxProd::open(&knxprod_path)
-        .with_context(|| format!("reading {}", knxprod_path.display()))?;
-    let ap = kp
-        .application_program(&h2p)
-        .with_context(|| format!("resolving {h2p}"))?;
-
-    let dev = project
-        .devices
-        .iter()
-        .find(|d| d.ia == ia)
-        .ok_or_else(|| anyhow::anyhow!("device instance {ia} not found"))?;
-
-    let mut values: HashMap<String, String> = HashMap::new();
-    for p in &dev.parameters {
-        values.insert(p.id.clone(), yaml_to_string(&p.value));
+    let values = device.values();
+    let links = device.links();
+    let ev = knx_prod::Evaluation::new(ap, &values);
+    if !ev.unknown_keys.is_empty() {
+        bail!(
+            "{ia} has values for parameters that {} does not define:\n  {}",
+            ap.id,
+            ev.unknown_keys
+                .iter()
+                .map(|k| knx_prod::eval::short_key(ap, k))
+                .collect::<Vec<_>>()
+                .join("\n  ")
+        );
     }
-    let links: Vec<(u16, u16)> = dev
-        .links
-        .iter()
-        .map(|l| (l.object_number, l.ga.to_u16()))
-        .collect();
+    let image = knx_prod::device_image::build_device_image_eval(&ev, &links)?;
 
-    let image = knx_prod::build_device_image(&ap, &values, &links)?;
-
-    println!("Download image for {ia} ({})", device_ref.name);
+    println!("Download image for {ia} ({})", device.device_ref.name);
+    print_warnings(&image.warnings);
     println!("{} segment(s):", image.segments.len());
     for seg in &image.segments {
-        let addr = if seg.address.is_empty() {
-            "-".to_string()
-        } else {
-            format!("0x{:04x}", seg.address.parse::<u32>().unwrap_or(0))
-        };
-        let mem = if seg.memory_type.is_empty() { "flash" } else { &seg.memory_type };
         println!(
             "  {:<44} {}  {:>5} bytes  {}",
-            seg.id, addr, seg.size, mem
+            seg.id,
+            segment_address(seg),
+            seg.size,
+            segment_memory(seg)
         );
     }
 
     println!("\nActive group objects: {}", image.active_group_objects.len());
-    for (asap, obj) in &image.active_group_objects {
-        println!(
-            "  #{:<4} flags={:02x} vft={}",
-            asap,
-            knx_prod::tables::go_descriptor_high(obj.flags),
-            obj.value_field_type
-        );
+    print_group_objects(&image.active_group_objects);
+
+    println!("\nTables ({:?}):", image.format);
+    for (name, t) in [
+        ("Group Address Table", &image.address_table),
+        ("Association Table", &image.association_table),
+        ("Group Object Table", &image.group_object_table),
+    ] {
+        let at = t
+            .placement
+            .as_ref()
+            .map(|p| format!(" at {}+{}", p.segment_id, p.offset))
+            .unwrap_or_default();
+        println!("\n{name} ({} bytes{at}):", t.bytes.len());
+        hex_dump(&t.bytes);
     }
 
-    let mut dumped: std::collections::HashSet<&str> = std::collections::HashSet::new();
-    for t in [
-        image.address_table.as_ref(),
-        image.association_table.as_ref(),
-        image.group_object_table.as_ref(),
-    ]
-    .into_iter()
-    .flatten()
-    {
-        dumped.insert(t.segment_id.as_str());
-    }
-    if !dumped.is_empty() {
-        println!("\nHex dump (table segments):");
-        for seg in &image.segments {
-            if !dumped.contains(seg.id.as_str()) {
-                continue;
-            }
-            println!("\n--- {} ({}) ---", seg.id, seg.memory_type);
-            for (i, chunk) in seg.data.chunks(16).enumerate() {
-                let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
-                println!("  {:04x}  {}", i * 16, hex.join(" "));
-            }
-        }
-    }
-
-    let plan = knx_prod::download_plan(&ap, &image)?;
-    println!(
-        "\nDownload plan ({} step(s), dry run — cEMI transport lands in M4):",
-        plan.len()
-    );
+    let kind = if partial {
+        knx_prod::DownloadKind::Partial
+    } else {
+        knx_prod::DownloadKind::Full
+    };
+    let master = if ap.load_procedure_style == "MergedProcedure" {
+        Some(device.knxprod.master_data()?)
+    } else {
+        None
+    };
+    let plan = knx_prod::download_plan(&ev, &image, master.as_ref(), kind)?;
+    println!("\nDownload plan ({} step(s), {kind:?}):", plan.len());
     for step in &plan {
-        match step {
-            knx_prod::DownloadStep::Connect => println!("  LdCtrlConnect"),
-            knx_prod::DownloadStep::Disconnect => println!("  LdCtrlDisconnect"),
-            knx_prod::DownloadStep::Restart => println!("  LdCtrlRestart"),
-            knx_prod::DownloadStep::CompareProp {
-                obj_idx,
-                prop_id,
-                inline_data,
-            } => {
-                let hex: Vec<String> =
-                    inline_data.iter().map(|b| format!("{b:02x}")).collect();
-                println!(
-                    "  LdCtrlCompareProp ObjIdx={obj_idx} PropId={prop_id} InlineData={}",
-                    hex.join("")
-                );
-            }
-            knx_prod::DownloadStep::Unload { lsm_idx } => {
-                println!("  LdCtrlUnload LsmIdx={lsm_idx}")
-            }
-            knx_prod::DownloadStep::Load { lsm_idx } => {
-                println!("  LdCtrlLoad LsmIdx={lsm_idx}")
-            }
-            knx_prod::DownloadStep::AbsSegment {
-                lsm_idx,
-                seg_type,
-                address,
-                size,
-                access,
-                mem_type,
-                seg_flags,
-                data: _,
-            } => println!(
-                "  LdCtrlAbsSegment LsmIdx={lsm_idx} SegType={seg_type} Address=0x{address:04x} Size={size} Access={access} MemType={mem_type} SegFlags={seg_flags}"
-            ),
-            knx_prod::DownloadStep::TaskSegment { lsm_idx, address } => {
-                println!("  LdCtrlTaskSegment LsmIdx={lsm_idx} Address=0x{address:04x}")
-            }
-            knx_prod::DownloadStep::LoadCompleted { lsm_idx } => {
-                println!("  LdCtrlLoadCompleted LsmIdx={lsm_idx}")
-            }
-        }
+        println!("  {}", describe_step(step));
     }
 
-    // Read the image back through the inverse decoders and diff against the
-    // project values. This is the dry-run half of the ETS byte-identity check
-    // (the other half is reading a real device over the transport).
-    let decoded = knx_prod::read_back_device(&ap, &image)?;
-    println!("\nRead-back self-check:");
+    // Decode the image again and compare with the evaluated configuration.
+    // This checks that encoder and decoder agree on placements and widths;
+    // it cannot show that the bytes are what ETS writes (that needs a
+    // comparison with an ETS download).
+    let decoded = knx_prod::read_back_device(&ev, &image)?;
     let mut diffs = 0usize;
-    for (id, value) in &values {
-        if let Some(decoded_value) = decoded.parameters.get(id) {
-            if decoded_value != value {
-                println!("  param {id}: project {value} != decoded {decoded_value}");
-                diffs += 1;
-            }
+    for (id, value) in &decoded.parameters {
+        if image.shadowed.contains(id) {
+            continue; // overwritten by an active alternative
+        }
+        let expected = ev.value(id).unwrap_or_default();
+        if !same_value(expected, value) {
+            println!("  param {id}: evaluated {expected} != decoded {value}");
+            diffs += 1;
         }
     }
-    if decoded.links != links {
-        println!("  links differ: project {links:?}");
-        println!("              decoded {:?}", decoded.links);
+    let mut expected_links: Vec<(u16, u16)> = image.links.iter().map(|l| (l.asap, l.ga)).collect();
+    let mut decoded_links: Vec<(u16, u16)> = decoded.links.iter().map(|l| (l.asap, l.ga)).collect();
+    expected_links.sort_unstable();
+    expected_links.dedup();
+    decoded_links.sort_unstable();
+    if expected_links != decoded_links {
+        println!("  links differ: {expected_links:?} != {decoded_links:?}");
         diffs += 1;
     }
-    if diffs == 0 {
-        println!("  OK: project parameters and links round-trip through the image");
-    } else {
-        println!("  {diffs} difference(s)");
-    }
+    println!(
+        "\nEncoder/decoder consistency: {}",
+        if diffs == 0 { "OK".to_string() } else { format!("{diffs} difference(s)") }
+    );
 
     println!("\n(not sent — USB cEMI transport is not implemented yet)");
     Ok(())
 }
 
-fn cmd_add(dir: &Path, knxprod_path: &Path, h2p: &str, ia_str: &str, name: Option<&str>) -> Result<()> {
+fn cmd_add(
+    dir: &Path,
+    knxprod_path: &Path,
+    h2p: &str,
+    ia_str: &str,
+    name: Option<&str>,
+) -> Result<()> {
     let ia: IndividualAddress = ia_str
         .parse()
         .with_context(|| format!("invalid individual address {ia_str}"))?;
+    if let Some(reason) = ia.reserved_reason() {
+        bail!("{ia} cannot be used for a device: {reason}");
+    }
 
     let kp = knx_prod::KnxProd::open(knxprod_path)
         .with_context(|| format!("reading {}", knxprod_path.display()))?;
@@ -959,16 +887,16 @@ fn cmd_rm(dir: &Path, ia_str: &str) -> Result<()> {
 
 fn cmd_group_add(dir: &Path, ga_str: &str, name: Option<&str>, dpt: Option<&str>) -> Result<()> {
     let ga: GroupAddress = ga_str.parse().with_context(|| format!("invalid GA {ga_str}"))?;
+    if ga.is_broadcast() {
+        bail!("0/0/0 is the broadcast address and cannot be used as a group address");
+    }
+    let dpt = dpt.map(normalize_dpt).transpose()?;
     let mut project = knx_store::load(dir)?;
     if project.groups.iter().any(|g| g.ga == ga) {
         bail!("group address {ga} already exists");
     }
     let name = name.map(str::to_string).unwrap_or_else(|| ga.to_string());
-    project.groups.push(GroupAddressEntry {
-        ga,
-        name,
-        dpt: dpt.map(str::to_string),
-    });
+    project.groups.push(GroupAddressEntry { ga, name, dpt });
     project.sort();
     knx_store::save(dir, &project)?;
     println!("Added group address {ga}");
@@ -1011,23 +939,82 @@ fn cmd_group_rm(dir: &Path, ga_str: &str, force: bool) -> Result<()> {
     Ok(())
 }
 
-fn cmd_link(dir: &Path, ia_str: &str, object: u16, ga_str: &str) -> Result<()> {
+fn cmd_link(
+    dir: &Path,
+    ia_str: &str,
+    object: u16,
+    ga_str: &str,
+    send: bool,
+    knxprod_override: Option<&Path>,
+) -> Result<()> {
     let ia: IndividualAddress = ia_str.parse().with_context(|| format!("invalid IA {ia_str}"))?;
     let ga: GroupAddress = ga_str.parse().with_context(|| format!("invalid GA {ga_str}"))?;
+    if ga.is_broadcast() {
+        bail!("0/0/0 is the broadcast address and cannot be linked");
+    }
     let mut project = knx_store::load(dir)?;
+    let entry = project
+        .groups
+        .iter()
+        .find(|g| g.ga == ga)
+        .ok_or_else(|| anyhow::anyhow!("group address {ga} does not exist; add it with `knxcfg group-add {ga}`"))?
+        .clone();
+
+    let device = open_device(dir, &project, ia, knxprod_override)?;
+    let objects = knx_prod::tables::group_objects(&device.ap);
+    if !objects.iter().any(|(n, _)| *n == object) {
+        bail!(
+            "{} has no group object #{object} (objects: {})",
+            device.ap.name,
+            number_ranges(objects.iter().map(|(n, _)| *n))
+        );
+    }
+    let active = knx_prod::tables::active_group_objects(&device.ap, &device.values());
+    match active.iter().find(|(n, _)| *n == object) {
+        None => eprintln!(
+            "warning: group object #{object} is not active with the current parameters; \
+             the link is kept but not downloaded"
+        ),
+        Some((_, obj)) => {
+            if let Some(ga_dpt) = &entry.dpt {
+                if let Ok(master) = device.knxprod.master_data() {
+                    if master.datapoint(ga_dpt).is_none() {
+                        eprintln!("warning: {ga} has {ga_dpt}, which knx_master.xml does not define");
+                    }
+                }
+                let wanted: Vec<Option<u32>> =
+                    obj.datapoint_type.split_whitespace().map(dpt_main).collect();
+                if !wanted.is_empty() && !wanted.contains(&dpt_main(ga_dpt)) {
+                    eprintln!(
+                        "warning: {ga} has {ga_dpt}, object #{object} expects {}",
+                        obj.datapoint_type
+                    );
+                }
+            }
+        }
+    }
+
     let dev = project
         .devices
         .iter_mut()
         .find(|d| d.ia == ia)
         .ok_or_else(|| anyhow::anyhow!("device {ia} not found"))?;
-    let link = GroupObjectLink { object_number: object, ga };
-    if dev.links.contains(&link) {
-        bail!("link {ia} #{object} -> {ga} already exists");
+    if send {
+        for l in dev.links.iter_mut().filter(|l| l.object_number == object) {
+            l.send = false;
+        }
     }
-    dev.links.push(link);
+    match dev.links.iter_mut().find(|l| l.object_number == object && l.ga == ga) {
+        Some(l) if send => l.send = true,
+        Some(_) => bail!("link {ia} #{object} -> {ga} already exists"),
+        None => dev.links.push(GroupObjectLink { object_number: object, ga, send }),
+    }
     project.sort();
     knx_store::save(dir, &project)?;
-    println!("Linked {ia} object #{object} -> {ga}");
+    println!(
+        "Linked {ia} object #{object} -> {ga}{}",
+        if send { " (sending)" } else { "" }
+    );
     Ok(())
 }
 
@@ -1040,9 +1027,8 @@ fn cmd_unlink(dir: &Path, ia_str: &str, object: u16, ga_str: &str) -> Result<()>
         .iter_mut()
         .find(|d| d.ia == ia)
         .ok_or_else(|| anyhow::anyhow!("device {ia} not found"))?;
-    let link = GroupObjectLink { object_number: object, ga };
     let before = dev.links.len();
-    dev.links.retain(|l| *l != link);
+    dev.links.retain(|l| !(l.object_number == object && l.ga == ga));
     if dev.links.len() == before {
         bail!("link {ia} #{object} -> {ga} not found");
     }
@@ -1052,95 +1038,95 @@ fn cmd_unlink(dir: &Path, ia_str: &str, object: u16, ga_str: &str) -> Result<()>
     Ok(())
 }
 
-fn cmd_device_set(dir: &Path, ia_str: &str, param: &str, value: &str) -> Result<()> {
+fn cmd_device_set(
+    dir: &Path,
+    ia_str: &str,
+    param: &str,
+    value: &str,
+    knxprod_override: Option<&Path>,
+) -> Result<()> {
     let ia: IndividualAddress = ia_str.parse().with_context(|| format!("invalid IA {ia_str}"))?;
     let mut project = knx_store::load(dir)?;
+    let device = open_device(dir, &project, ia, knxprod_override)?;
+    let ap = &device.ap;
+
+    let key = knx_prod::eval::full_key(ap, param);
+    knx_form::validate(ap, &key, value).with_context(|| format!("{param} = {value:?}"))?;
+    if !knx_form::is_editable(ap, &key) {
+        bail!("{param} is not user-editable (Access=None/ReadOnly in the knxprod)");
+    }
+
+    let mut values = device.values();
+    values.insert(key.clone(), value.to_string());
+    let ev = knx_prod::Evaluation::new(ap, &values);
+    if ev.is_forced(&key) {
+        bail!("{param} is set by the application (Assign/calculation); it cannot be changed");
+    }
+    if !ev.is_param_active(&key) {
+        eprintln!("warning: {param} is not visible with the current parameters");
+    }
+    let is_default = ev.default_of(&key) == Some(value);
+
+    let short = knx_prod::eval::short_key(ap, &key);
     let dev = project
         .devices
         .iter_mut()
         .find(|d| d.ia == ia)
         .ok_or_else(|| anyhow::anyhow!("device {ia} not found"))?;
-    if let Some(p) = dev.parameters.iter_mut().find(|p| p.id == param) {
-        p.value = serde_yaml::Value::String(value.to_string());
-    } else {
+    dev.parameters
+        .retain(|p| knx_prod::eval::full_key(ap, &p.id) != key);
+    if !is_default {
         dev.parameters.push(ParameterValue {
-            id: param.to_string(),
+            id: short,
             value: serde_yaml::Value::String(value.to_string()),
         });
     }
     project.sort();
     knx_store::save(dir, &project)?;
-    println!("Set {ia} {param} = {value}");
+    println!(
+        "Set {ia} {param} = {value}{}",
+        if is_default { " (default, not stored)" } else { "" }
+    );
     Ok(())
 }
 
 fn cmd_edit(dir: &Path, ia_str: &str, knxprod_override: Option<&Path>) -> Result<()> {
-    use std::collections::HashMap;
-
     let ia: IndividualAddress = ia_str.parse().with_context(|| format!("invalid IA {ia_str}"))?;
     let mut project = knx_store::load(dir)?;
+    let device = open_device(dir, &project, ia, knxprod_override)?;
+    let ap = &device.ap;
 
-    // Resolve the hardware ref + recorded knxprod from the topology.
-    let device_ref = project
-        .topology
-        .iter()
-        .flat_map(|a| a.lines.iter())
-        .flat_map(|l| l.devices.iter())
-        .find(|d| d.ia == ia)
-        .ok_or_else(|| anyhow::anyhow!("device {ia} not found in topology"))?;
-    let h2p = device_ref.hardware.clone();
-
-    let knxprod_path = product_store::resolve(
-        &h2p,
-        Some(dir),
-        device_ref.knxprod.as_deref().map(Path::new),
-        knxprod_override,
-    )?;
-
-    let kp = knx_prod::KnxProd::open(&knxprod_path)
-        .with_context(|| format!("reading {}", knxprod_path.display()))?;
-    let ap = kp
-        .application_program(&h2p)
-        .with_context(|| format!("resolving {h2p}"))?;
-
-    let dev_params = project
-        .devices
-        .iter()
-        .find(|d| d.ia == ia)
-        .map(|d| d.parameters.clone())
-        .unwrap_or_default();
-    let mut values: HashMap<String, String> = HashMap::new();
-    for p in &dev_params {
-        values.insert(p.id.clone(), yaml_to_string(&p.value));
-    }
-
-    // Snapshot the knxprod defaults so saving can be minimal/deterministic:
-    // any value equal to its default is redundant and is not persisted.
-    let defaults = knx_prod::parameter_defaults(&ap);
-
-    let saved = tui::edit_device(&ap, &values)?;
-    if let Some(new_values) = saved {
-        let dev = project
-            .devices
-            .iter_mut()
-            .find(|d| d.ia == ia)
-            .ok_or_else(|| anyhow::anyhow!("device {ia} not found"))?;
-        let mut params: Vec<ParameterValue> = new_values
-            .into_iter()
-            .filter(|(id, value)| defaults.get(id) != Some(value))
-            .map(|(id, value)| ParameterValue {
-                id,
-                value: serde_yaml::Value::String(value),
-            })
-            .collect();
-        params.sort_by(|a, b| a.id.cmp(&b.id));
-        dev.parameters = params;
-        project.sort();
-        knx_store::save(dir, &project)?;
-        println!("Saved {ia}");
-    } else {
+    let saved = tui::edit_device(ap, &device.values())?;
+    let Some(new_values) = saved else {
         println!("No changes saved");
-    }
+        return Ok(());
+    };
+
+    // Keep the project minimal and deterministic: store only values that
+    // differ from what the application would use without them.
+    let ev = knx_prod::Evaluation::new(ap, &new_values);
+    let mut params: Vec<ParameterValue> = new_values
+        .into_iter()
+        .filter(|(id, value)| {
+            !ev.unknown_keys.contains(id)
+                && !ev.is_forced(id)
+                && ev.default_of(id) != Some(value.as_str())
+        })
+        .map(|(id, value)| ParameterValue {
+            id: knx_prod::eval::short_key(ap, &id),
+            value: serde_yaml::Value::String(value),
+        })
+        .collect();
+    params.sort_by(|a, b| a.id.cmp(&b.id));
+    let dev = project
+        .devices
+        .iter_mut()
+        .find(|d| d.ia == ia)
+        .ok_or_else(|| anyhow::anyhow!("device {ia} not found"))?;
+    dev.parameters = params;
+    project.sort();
+    knx_store::save(dir, &project)?;
+    println!("Saved {ia}");
     Ok(())
 }
 
@@ -1153,4 +1139,218 @@ fn yaml_to_string(v: &serde_yaml::Value) -> String {
         }
         _ => String::new(),
     }
+}
+
+/// A project device with its resolved product data.
+struct OpenDevice {
+    device_ref: DeviceRef,
+    instance: DeviceInstance,
+    knxprod: knx_prod::KnxProd,
+    ap: knx_prod::ApplicationProgram,
+}
+
+impl OpenDevice {
+    /// The device's stored parameter values, keyed by full parameter key.
+    fn values(&self) -> std::collections::HashMap<String, String> {
+        self.instance
+            .parameters
+            .iter()
+            .map(|p| (knx_prod::eval::full_key(&self.ap, &p.id), yaml_to_string(&p.value)))
+            .collect()
+    }
+
+    fn links(&self) -> Vec<knx_prod::tables::Link> {
+        self.instance
+            .links
+            .iter()
+            .map(|l| knx_prod::tables::Link {
+                asap: l.object_number,
+                ga: l.ga.to_u16(),
+                send: l.send,
+            })
+            .collect()
+    }
+}
+
+fn open_device(
+    dir: &Path,
+    project: &knx_core::Project,
+    ia: IndividualAddress,
+    knxprod_override: Option<&Path>,
+) -> Result<OpenDevice> {
+    let device_ref = project
+        .topology
+        .iter()
+        .flat_map(|a| a.lines.iter())
+        .flat_map(|l| l.devices.iter())
+        .find(|d| d.ia == ia)
+        .ok_or_else(|| anyhow::anyhow!("device {ia} not found in topology"))?
+        .clone();
+    let instance = project
+        .devices
+        .iter()
+        .find(|d| d.ia == ia)
+        .cloned()
+        .unwrap_or(DeviceInstance { ia, parameters: vec![], links: vec![] });
+    let path = product_store::resolve(
+        &device_ref.hardware,
+        Some(dir),
+        device_ref.knxprod.as_deref().map(Path::new),
+        knxprod_override,
+    )?;
+    let knxprod = knx_prod::KnxProd::open(&path)
+        .with_context(|| format!("reading {}", path.display()))?;
+    let ap = knxprod
+        .application_program(&device_ref.hardware)
+        .with_context(|| format!("resolving {}", device_ref.hardware))?;
+    Ok(OpenDevice { device_ref, instance, knxprod, ap })
+}
+
+fn print_warnings(warnings: &[String]) {
+    for w in warnings {
+        eprintln!("warning: {w}");
+    }
+}
+
+fn segment_address(seg: &knx_prod::SegmentImage) -> String {
+    match (seg.address.parse::<u32>(), seg.load_state_machine) {
+        (Ok(a), _) => format!("0x{a:04x}"),
+        (_, Some(lsm)) => format!("LSM {lsm}"),
+        _ => "-".to_string(),
+    }
+}
+
+fn segment_memory(seg: &knx_prod::SegmentImage) -> &str {
+    if seg.memory_type.is_empty() {
+        "-"
+    } else {
+        &seg.memory_type
+    }
+}
+
+fn hex_dump(data: &[u8]) {
+    for (i, chunk) in data.chunks(16).enumerate() {
+        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+        println!("  {:04x}  {}", i * 16, hex.join(" "));
+    }
+}
+
+fn print_group_objects(objects: &[(u16, knx_prod::tables::GroupObject)]) {
+    for (asap, obj) in objects {
+        let f = obj.flags;
+        let flag = |on: bool, c: char| if on { c } else { '-' };
+        println!(
+            "  #{:<4} {}{}{}{}{}{} {:<9} {:<14} {} {}",
+            asap,
+            flag(f.communicate, 'C'),
+            flag(f.read, 'R'),
+            flag(f.write, 'W'),
+            flag(f.transmit, 'T'),
+            flag(f.update, 'U'),
+            flag(f.read_on_init, 'I'),
+            obj.object_size,
+            obj.datapoint_type,
+            obj.text,
+            obj.function_text
+        );
+    }
+}
+
+fn describe_step(step: &knx_prod::DownloadStep) -> String {
+    use knx_prod::DownloadStep as S;
+    let hex = |d: &[u8]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    match step {
+        S::Connect => "Connect".into(),
+        S::Disconnect => "Disconnect".into(),
+        S::Restart => "Restart".into(),
+        S::CompareProp { obj_idx, prop_id, inline_data } => {
+            format!("CompareProp ObjIdx={obj_idx} PropId={prop_id} Data={}", hex(inline_data))
+        }
+        S::Unload { lsm_idx } => format!("Unload LsmIdx={lsm_idx}"),
+        S::Load { lsm_idx } => format!("Load LsmIdx={lsm_idx}"),
+        S::LoadCompleted { lsm_idx } => format!("LoadCompleted LsmIdx={lsm_idx}"),
+        S::AbsSegment { lsm_idx, seg_type, address, size, access, mem_type, seg_flags, data } => format!(
+            "AbsSegment LsmIdx={lsm_idx} SegType={seg_type} Address=0x{address:04x} Size={size} \
+             Access={access} MemType={mem_type} SegFlags={seg_flags} ({})",
+            if data.is_empty() { "allocate only".to_string() } else { format!("write {} bytes", data.len()) }
+        ),
+        S::TaskSegment { lsm_idx, address, pei_type, app_id } => format!(
+            "TaskSegment LsmIdx={lsm_idx} Address=0x{address:04x} PeiType={pei_type} AppId={}",
+            hex(app_id)
+        ),
+        S::RelSegment { lsm_idx, size, mode, fill } => {
+            format!("RelSegment LsmIdx={lsm_idx} Size={size} Mode={mode} Fill={fill}")
+        }
+        S::WriteRelMem { obj_idx, offset, data, verify } => format!(
+            "WriteRelMem ObjIdx={obj_idx} Offset={offset} Size={} Verify={verify}",
+            data.len()
+        ),
+        S::WriteProp { obj_idx, prop_id, data, verify } => {
+            format!("WriteProp ObjIdx={obj_idx} PropId={prop_id} Data={} Verify={verify}", hex(data))
+        }
+        S::ReadProp { obj_idx, prop_id } => format!("ReadProp ObjIdx={obj_idx} PropId={prop_id}"),
+        S::Delay { ms } => format!("Delay {ms} ms"),
+        S::MapError { original, mapped } => format!("MapError {original} -> {mapped}"),
+    }
+}
+
+/// Compare an evaluated and a decoded value (numbers numerically, so a
+/// float default written as `1.5E+001` matches `15`).
+fn same_value(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
+        // DPT 9 is lossy (11-bit mantissa).
+        (Ok(x), Ok(y)) => (x - y).abs() <= x.abs().max(y.abs()) * 0.005 + 0.01,
+        _ => a.eq_ignore_ascii_case(b),
+    }
+}
+
+/// Normalize a DPT given on the command line: `DPT-9`, `DPST-9-1`, `9`,
+/// `9.001` → `DPT-9` / `DPST-9-1`.
+fn normalize_dpt(s: &str) -> Result<String> {
+    let s = s.trim();
+    let bad = || anyhow::anyhow!("invalid DPT {s:?} (expected e.g. DPST-1-1, DPT-9 or 9.001)");
+    let (main, sub) = if let Some(r) = s.strip_prefix("DPST-") {
+        let (m, x) = r.split_once('-').ok_or_else(bad)?;
+        (m, Some(x))
+    } else if let Some(r) = s.strip_prefix("DPT-") {
+        (r, None)
+    } else if let Some((m, x)) = s.split_once('.') {
+        (m, Some(x))
+    } else {
+        (s, None)
+    };
+    let main: u32 = main.parse().map_err(|_| bad())?;
+    match sub {
+        None => Ok(format!("DPT-{main}")),
+        Some(x) => Ok(format!("DPST-{main}-{}", x.parse::<u32>().map_err(|_| bad())?)),
+    }
+}
+
+fn dpt_main(s: &str) -> Option<u32> {
+    normalize_dpt(s)
+        .ok()?
+        .split('-')
+        .nth(1)
+        .and_then(|m| m.parse().ok())
+}
+
+/// `0-5, 7, 9-12`
+fn number_ranges(numbers: impl Iterator<Item = u16>) -> String {
+    let mut v: Vec<u16> = numbers.collect();
+    v.sort_unstable();
+    v.dedup();
+    let mut out: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < v.len() {
+        let start = v[i];
+        while i + 1 < v.len() && v[i + 1] == v[i] + 1 {
+            i += 1;
+        }
+        out.push(if v[i] == start { start.to_string() } else { format!("{start}-{}", v[i]) });
+        i += 1;
+    }
+    out.join(", ")
 }

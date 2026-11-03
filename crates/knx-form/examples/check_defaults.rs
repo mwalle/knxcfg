@@ -8,8 +8,9 @@ fn main() {
             let Ok(ap) = kp.application_program(&h2p) else { continue };
             let values = HashMap::new();
             let lang = if ap.default_language.is_empty() { "en-US" } else { &ap.default_language };
-            let pages = knx_form::evaluate(&ap, &values, lang);
-            let defaults = knx_prod::parameter_defaults(&ap);
+            let ev = knx_prod::Evaluation::new(&ap, &values);
+            let pages = knx_form::evaluate_with(&ev, lang);
+            let defaults = ev.values();
             for page in &pages {
                 for section in &page.sections {
                     for f in &section.fields {

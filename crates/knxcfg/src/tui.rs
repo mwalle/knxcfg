@@ -3,7 +3,8 @@
 //! Renders the dynamic parameter form produced by `knx-form` and lets the
 //! user change values; visibility is re-evaluated after every change.
 //! Pages (ETS panes) are shown as tabs; navigate with Tab / Shift-Tab.
-//! Enumerated parameters open a popup listing every possible value.
+//! Enumerated parameters open a popup listing every possible value; typed
+//! values are validated against the parameter type before they are taken.
 
 use std::collections::HashMap;
 use std::io;
@@ -39,7 +40,7 @@ enum Row {
 #[derive(Clone)]
 enum Mode {
     Normal,
-    TextEdit { id: String, buffer: String },
+    TextEdit { id: String, buffer: String, error: Option<String> },
     EnumPick { id: String, options: Vec<EnumOption>, cursor: usize },
 }
 
@@ -116,22 +117,27 @@ fn run_loop(
         // write `*mode` back without borrow conflicts.
         match mode.clone() {
             Mode::Normal => {}
-            Mode::TextEdit { id, mut buffer } => {
+            Mode::TextEdit { id, mut buffer, .. } => {
                 match key.code {
-                    KeyCode::Enter => {
-                        values.insert(id.clone(), buffer.clone());
-                        *mode = Mode::Normal;
-                        pages = evaluate(ap, values, lang);
-                        restore_cursor(&pages, *page_index, cursor, &id);
-                    }
+                    KeyCode::Enter => match knx_form::validate(ap, &id, &buffer) {
+                        Ok(()) => {
+                            values.insert(id.clone(), buffer.clone());
+                            *mode = Mode::Normal;
+                            pages = evaluate(ap, values, lang);
+                            restore_cursor(&pages, *page_index, cursor, &id);
+                        }
+                        Err(e) => {
+                            *mode = Mode::TextEdit { id, buffer, error: Some(format!("{e:#}")) };
+                        }
+                    },
                     KeyCode::Esc => *mode = Mode::Normal,
                     KeyCode::Char(c) => {
                         buffer.push(c);
-                        *mode = Mode::TextEdit { id, buffer };
+                        *mode = Mode::TextEdit { id, buffer, error: None };
                     }
                     KeyCode::Backspace => {
                         buffer.pop();
-                        *mode = Mode::TextEdit { id, buffer };
+                        *mode = Mode::TextEdit { id, buffer, error: None };
                     }
                     _ => {}
                 }
@@ -209,7 +215,7 @@ fn run_loop(
                         *mode = Mode::EnumPick { id, options, cursor: pos };
                     }
                     FieldKind::Number { .. } | FieldKind::Text => {
-                        *mode = Mode::TextEdit { id, buffer: current };
+                        *mode = Mode::TextEdit { id, buffer: current, error: None };
                     }
                 }
             }
@@ -295,7 +301,10 @@ fn draw(
     f.render_stateful_widget(list, chunks[1], list_state);
 
     let help = match mode {
-        Mode::TextEdit { buffer, .. } => format!("> {buffer}_   (Enter: confirm · Esc: cancel)"),
+        Mode::TextEdit { buffer, error: None, .. } => {
+            format!("> {buffer}_   (Enter: confirm · Esc: cancel)")
+        }
+        Mode::TextEdit { buffer, error: Some(e), .. } => format!("> {buffer}_   invalid: {e}"),
         Mode::EnumPick { .. } => {
             "↑/↓: choose value · Enter: confirm · Esc: cancel".to_string()
         }

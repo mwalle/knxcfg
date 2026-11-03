@@ -521,6 +521,7 @@ dependencies = [
 name = "knx-form"
 version = "0.1.0"
 dependencies = [
+ "anyhow",
  "knx-prod",
 ]
 

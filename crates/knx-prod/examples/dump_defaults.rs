@@ -4,10 +4,10 @@ fn main() {
     let h2p = std::env::args().nth(2).unwrap();
     let kp = KnxProd::open(&path).unwrap();
     let ap = kp.application_program(&h2p).unwrap();
-    let defaults = knx_prod::parameter_defaults(&ap);
-    let mut keys: Vec<_> = defaults.keys().collect();
+    let ev = knx_prod::Evaluation::new(&ap, &Default::default());
+    let mut keys: Vec<_> = ev.values().keys().collect();
     keys.sort();
     for k in keys {
-        println!("{:?} = {:?}", k, defaults.get(k).unwrap());
+        println!("{:?} = {:?}", k, ev.value(k).unwrap());
     }
 }

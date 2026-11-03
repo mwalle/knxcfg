@@ -328,6 +328,10 @@ pub struct ParameterValue {
 pub struct GroupObjectLink {
     pub object_number: u16,
     pub ga: GroupAddress,
+    /// The object transmits on this address (at most one per object). When
+    /// no link of an object is marked, it transmits on its lowest address.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub send: bool,
 }
 
 #[cfg(test)]
