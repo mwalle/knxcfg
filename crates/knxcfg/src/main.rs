@@ -94,7 +94,12 @@ enum Cmd {
         dpt: Option<String>,
     },
     /// Remove a group address
-    GroupRm { ga: String },
+    GroupRm {
+        ga: String,
+        /// Also remove the links that use it
+        #[arg(long)]
+        force: bool,
+    },
     /// Link a device group object to a group address
     Link {
         ia: String,
@@ -203,9 +208,9 @@ fn main() -> Result<()> {
             let dir = resolve_project(project.as_deref())?;
             cmd_group_add(&dir, &ga, name.as_deref(), dpt.as_deref())
         }
-        Cmd::GroupRm { ga } => {
+        Cmd::GroupRm { ga, force } => {
             let dir = resolve_project(project.as_deref())?;
-            cmd_group_rm(&dir, &ga)
+            cmd_group_rm(&dir, &ga, force)
         }
         Cmd::Link { ia, object, ga } => {
             let dir = resolve_project(project.as_deref())?;
@@ -970,13 +975,35 @@ fn cmd_group_add(dir: &Path, ga_str: &str, name: Option<&str>, dpt: Option<&str>
     Ok(())
 }
 
-fn cmd_group_rm(dir: &Path, ga_str: &str) -> Result<()> {
+fn cmd_group_rm(dir: &Path, ga_str: &str, force: bool) -> Result<()> {
     let ga: GroupAddress = ga_str.parse().with_context(|| format!("invalid GA {ga_str}"))?;
     let mut project = knx_store::load(dir)?;
     let before = project.groups.len();
     project.groups.retain(|g| g.ga != ga);
     if project.groups.len() == before {
         bail!("group address {ga} not found");
+    }
+    let users: Vec<String> = project
+        .devices
+        .iter()
+        .flat_map(|d| {
+            d.links
+                .iter()
+                .filter(|l| l.ga == ga)
+                .map(move |l| format!("{} #{}", d.ia, l.object_number))
+        })
+        .collect();
+    if !users.is_empty() {
+        if !force {
+            bail!(
+                "{ga} is linked to {}; unlink first or pass --force to remove the links too",
+                users.join(", ")
+            );
+        }
+        for d in &mut project.devices {
+            d.links.retain(|l| l.ga != ga);
+        }
+        println!("Removed {} link(s): {}", users.len(), users.join(", "));
     }
     project.sort();
     knx_store::save(dir, &project)?;
