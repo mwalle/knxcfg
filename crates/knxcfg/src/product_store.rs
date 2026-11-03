@@ -4,7 +4,8 @@
 //!
 //! Search order for `resolve`:
 //! 1. an explicit `--knxprod <file>` override (validated to provide the h2p),
-//! 2. the device's recorded knxprod path (D13 fast path, if the file exists),
+//! 2. the device's recorded knxprod path (D13 fast path, if the file exists;
+//!    relative paths are relative to the project),
 //! 3. the project's `vendor/` directory,
 //! 4. the global store directory.
 //!
@@ -28,6 +29,20 @@ pub fn global_store_dir() -> PathBuf {
 /// The project-local vendored knxprod directory (`<project>/vendor`).
 pub fn vendor_dir(project: &Path) -> PathBuf {
     project.join("vendor")
+}
+
+/// The knxprod path to record for a device: relative to the project when the
+/// file lives inside it (e.g. `vendor/…`), so the project stays portable
+/// through git; otherwise the absolute path (the h2p lookup in the stores is
+/// the fallback when it does not exist on another machine).
+pub fn record_path(project: &Path, file: &Path) -> String {
+    let abs = std::fs::canonicalize(file).unwrap_or_else(|_| file.to_path_buf());
+    if let Ok(root) = std::fs::canonicalize(project) {
+        if let Ok(rel) = abs.strip_prefix(&root) {
+            return rel.to_string_lossy().into_owned();
+        }
+    }
+    abs.to_string_lossy().into_owned()
 }
 
 /// Copy knxprod files into a store directory (global or project vendor).
@@ -70,8 +85,13 @@ pub fn resolve(
     }
 
     if let Some(p) = recorded {
+        // Recorded paths inside the project are stored relative to it.
+        let p = match project {
+            Some(dir) if p.is_relative() => dir.join(p),
+            _ => p.to_path_buf(),
+        };
         if p.is_file() {
-            return Ok(p.to_path_buf());
+            return Ok(p);
         }
     }
 

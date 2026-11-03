@@ -881,8 +881,6 @@ fn cmd_add(dir: &Path, knxprod_path: &Path, h2p: &str, ia_str: &str, name: Optio
         .find(|p| p.hardware2program_ref_id.as_deref() == Some(h2p))
         .ok_or_else(|| anyhow::anyhow!("{h2p} not found in {}", knxprod_path.display()))?;
 
-    let knxprod_abs = std::fs::canonicalize(knxprod_path).unwrap_or_else(|_| knxprod_path.to_path_buf());
-
     let mut project = knx_store::load(dir)?;
 
     let area = match project.topology.iter_mut().find(|a| a.number == ia.area) {
@@ -917,7 +915,7 @@ fn cmd_add(dir: &Path, knxprod_path: &Path, h2p: &str, ia_str: &str, name: Optio
         name: dev_name,
         hardware: h2p.to_string(),
         application: None,
-        knxprod: Some(knxprod_abs.to_string_lossy().into_owned()),
+        knxprod: Some(product_store::record_path(dir, knxprod_path)),
     });
     if !project.devices.iter().any(|d| d.ia == ia) {
         project.devices.push(DeviceInstance {
