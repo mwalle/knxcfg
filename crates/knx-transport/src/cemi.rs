@@ -73,8 +73,9 @@ impl Priority {
 /// only the two high APCI bits; the TPCI is ORed in). An empty `apdu` gives a
 /// transport control frame (`T_Connect`, `T_Disconnect`, `T_ACK`).
 pub fn l_data_req(tpci: u8, src: u16, dst: u16, apdu: &[u8]) -> CemiFrame {
-    // Ctrl1: standard frame (FT=1), repeat allowed (R=1), broadcast (not
-    // system-broadcast, SB=1), system priority, acknowledge requested.
+    // Ctrl1: standard frame (FT=1), no repetition on error (R=1; R=0 would
+    // request repetitions, `03_06_03 §4.1.5.3.2`), broadcast (not
+    // system-broadcast, SB=1), system priority, L2 acknowledge requested.
     let ctrl1 = 0x80 | 0x20 | 0x10 | (Priority::System.code() << 2) | 0x02;
     // Ctrl2: individual destination (AT=0), hop count 6, standard frame
     // (EFF=0000).

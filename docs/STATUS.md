@@ -125,9 +125,13 @@ compared with an ETS download. The plan is encoded as cEMI frames
 `PID_TABLE_REFERENCE` at run time.
 **M4** (USB transport, in progress): USB HID framing, `hidraw`, the EMI
 handshake, the TL connection and DD0/memory reads are implemented and
-tested against scripted mocks. First hardware run: Device Feature
-handshake OK, but no `L_Data.con` for `T_Connect` (cEMI mode not set; fixed
-by `PID_COMM_MODE`, re-test pending). Still to do: a working hardware run,
+tested against scripted mocks. Hardware runs (knx-usb interface, own
+firmware in `knx-core/standalone/knx-usb`, 2026-11-04): Device Feature
+handshake and `PID_COMM_MODE` write confirmed; no `L_Data.con` for any
+`L_Data.req` (`T_Connect` to 1.1.1, several Ctrl1/source variants), no bus
+traffic while listening, and `knx-usb-cli mem 1.1.1` got no reply either —
+the TP1 side of the interface (or the absence of a device at 1.1.1) is the
+open question, not the USB framing. Still to do: a working hardware run,
 `A_PropertyValue_Read/Write` responses, `NM_IndividualAddress_Read/Write`,
 executing a download plan (incl. `LdCtrlWriteRelMem`).
 Next: finish **M4** with a hardware run, then live download/read-back ·
