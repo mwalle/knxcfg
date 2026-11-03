@@ -35,6 +35,24 @@ impl IndividualAddress {
     pub fn is_zero(&self) -> bool {
         self.area == 0 && self.line == 0 && self.device == 0
     }
+
+    /// Raw 16-bit individual address: `area(4) << 12 | line(4) << 8 | device(8)`.
+    pub fn to_u16(self) -> u16 {
+        ((self.area as u16) << 12) | ((self.line as u16) << 8) | self.device as u16
+    }
+
+    /// Why this address cannot be given to an ordinary device, if so:
+    /// `x.y.0` belongs to the line/area coupler and `15.15.255` is the
+    /// factory default of unprogrammed devices.
+    pub fn reserved_reason(&self) -> Option<&'static str> {
+        if self.device == 0 {
+            Some("device address 0 is reserved for line and area couplers")
+        } else if self.area == 15 && self.line == 15 && self.device == 255 {
+            Some("15.15.255 is the factory default address of unprogrammed devices")
+        } else {
+            None
+        }
+    }
 }
 
 impl fmt::Display for IndividualAddress {
@@ -103,6 +121,24 @@ impl GroupAddress {
     pub fn to_u16(self) -> u16 {
         ((self.main as u16) << 11) | ((self.middle as u16) << 8) | self.sub as u16
     }
+
+    pub fn from_u16(raw: u16) -> Self {
+        Self {
+            main: (raw >> 11) as u8,
+            middle: ((raw >> 8) & 0x07) as u8,
+            sub: raw as u8,
+        }
+    }
+
+    /// `0/0/0` is the broadcast address; it cannot be linked to an object.
+    pub fn is_broadcast(&self) -> bool {
+        self.to_u16() == 0
+    }
+
+    /// Two-level notation `main/sub` (sub = 11 bits).
+    pub fn to_two_level(self) -> String {
+        format!("{}/{}", self.main, self.to_u16() & 0x07FF)
+    }
 }
 
 impl fmt::Display for GroupAddress {
@@ -111,24 +147,35 @@ impl fmt::Display for GroupAddress {
     }
 }
 
+/// Accepts the three notations ETS uses: three-level `main/middle/sub`,
+/// two-level `main/sub` (sub 0..=2047) and free `raw` (0..=65535). The
+/// address is always stored and printed three-level.
 impl FromStr for GroupAddress {
     type Err = AddressError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let parts: Vec<&str> = s.split('/').collect();
-        if parts.len() != 3 {
-            return Err(AddressError::Format(s.to_string()));
+        let bad = || AddressError::Format(s.to_string());
+        let parts: Vec<&str> = s.trim().split('/').collect();
+        match parts.as_slice() {
+            [main, middle, sub] => Self::new(
+                main.parse().map_err(|_| bad())?,
+                middle.parse().map_err(|_| bad())?,
+                sub.parse().map_err(|_| bad())?,
+            ),
+            [main, sub] => {
+                let main: u8 = main.parse().map_err(|_| bad())?;
+                let sub: u16 = sub.parse().map_err(|_| bad())?;
+                if main > 31 {
+                    return Err(AddressError::Range("main group must be 0..=31"));
+                }
+                if sub > 2047 {
+                    return Err(AddressError::Range("two-level sub group must be 0..=2047"));
+                }
+                Ok(Self::from_u16(((main as u16) << 11) | sub))
+            }
+            [raw] => Ok(Self::from_u16(raw.parse().map_err(|_| bad())?)),
+            _ => Err(bad()),
         }
-        let main = parts[0]
-            .parse::<u8>()
-            .map_err(|_| AddressError::Format(s.to_string()))?;
-        let middle = parts[1]
-            .parse::<u8>()
-            .map_err(|_| AddressError::Format(s.to_string()))?;
-        let sub = parts[2]
-            .parse::<u8>()
-            .map_err(|_| AddressError::Format(s.to_string()))?;
-        Self::new(main, middle, sub)
     }
 }
 
@@ -300,6 +347,24 @@ mod tests {
     fn ga_string_roundtrip() {
         let ga: GroupAddress = "3/4/200".parse().unwrap();
         assert_eq!(ga.to_string(), "3/4/200");
+    }
+
+    #[test]
+    fn ga_notations() {
+        let three: GroupAddress = "1/2/3".parse().unwrap();
+        assert_eq!("1/515".parse::<GroupAddress>().unwrap(), three);
+        assert_eq!("2563".parse::<GroupAddress>().unwrap(), three);
+        assert_eq!(three.to_two_level(), "1/515");
+        assert!("1/2048".parse::<GroupAddress>().is_err());
+        assert!("65536".parse::<GroupAddress>().is_err());
+        assert!("0/0/0".parse::<GroupAddress>().unwrap().is_broadcast());
+    }
+
+    #[test]
+    fn reserved_individual_addresses() {
+        assert!("1.1.0".parse::<IndividualAddress>().unwrap().reserved_reason().is_some());
+        assert!("15.15.255".parse::<IndividualAddress>().unwrap().reserved_reason().is_some());
+        assert!("1.1.1".parse::<IndividualAddress>().unwrap().reserved_reason().is_none());
     }
 
     #[test]
