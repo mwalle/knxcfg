@@ -17,6 +17,7 @@ mod catalog;
 pub mod device_image;
 mod dynamic;
 mod hardware;
+mod master;
 pub mod memory;
 pub mod tables;
 
@@ -40,6 +41,7 @@ pub use device_image::{
     build_device_image, download_plan, read_back_device, DeviceConfiguration, DeviceImage,
     DownloadStep, TablePlacement,
 };
+pub use master::{DatapointSubtype, DatapointType, MasterData, MaskProcedure, MaskVersion};
 pub use memory::{
     build_parameter_image, check_template, parameter_defaults, MemoryImage, Placement, SegmentImage,
 };
@@ -102,6 +104,18 @@ impl KnxProd {
         let app_name = format!("{}/{app_ref}.xml", self.manufacturer_id);
         let app_xml = read_entry_str(&mut archive, &app_name)?;
         app::parse_application_program(&app_xml)
+    }
+
+    /// Parse the archive's `knx_master.xml` (mask versions with their load
+    /// procedures, datapoint types).
+    pub fn master_data(&self) -> Result<MasterData> {
+        let file =
+            std::fs::File::open(&self.path).with_context(|| format!("opening {}", self.path.display()))?;
+        let mut archive = zip::ZipArchive::new(file).context("reading knxprod ZIP")?;
+        let name = find_entry(&archive, "knx_master.xml")
+            .ok_or_else(|| anyhow!("no knx_master.xml found in knxprod"))?;
+        let xml = read_entry_str(&mut archive, &name)?;
+        master::parse_master(&xml)
     }
 }
 
