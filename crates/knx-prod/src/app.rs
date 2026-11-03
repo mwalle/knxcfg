@@ -53,6 +53,15 @@ pub struct ApplicationProgram {
     pub load_procedure_style: String,
     #[serde(rename = "@DefaultLanguage", default)]
     pub default_language: String,
+    /// PEI type expected by the application (`LdCtrlTaskSegment` event data).
+    #[serde(rename = "@PeiType", default)]
+    pub pei_type: String,
+    /// Application versions this one can be upgraded from.
+    #[serde(rename = "@ReplacesVersions", default)]
+    pub replaces_versions: String,
+    /// KNX Data Secure capable (`IsSecureEnabled="true"`).
+    #[serde(rename = "@IsSecureEnabled", default)]
+    pub is_secure_enabled: String,
     #[serde(rename = "Static", default)]
     pub static_: Option<Static>,
     #[serde(rename = "Dynamic", default)]
@@ -159,6 +168,84 @@ pub struct Static {
     /// load, absolute segments, task segments, load-completed, restart).
     #[serde(rename = "LoadProcedures", default)]
     pub load_procedures: Option<LoadProcedures>,
+    /// JavaScript-backed parameter transformations (`L` → `R` parameters).
+    #[serde(rename = "ParameterCalculations", default)]
+    pub parameter_calculations: Option<ParameterCalculations>,
+    /// Named counters for `NumericArg AllocatorRefId` (dynamic module
+    /// allocation). Parsed so their use can be reported; not evaluated.
+    #[serde(rename = "Allocators", default)]
+    pub allocators: Option<Allocators>,
+    #[serde(rename = "Options", default)]
+    pub options: Option<AppOptions>,
+}
+
+impl Static {
+    /// `true` when multi-octet parameter values are stored little-endian
+    /// (`<Options ParameterByteOrder="LittleEndian">`, used by System B
+    /// applications). The default is big-endian.
+    pub fn little_endian_parameters(&self) -> bool {
+        self.options
+            .as_ref()
+            .map(|o| o.parameter_byte_order == "LittleEndian")
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct AppOptions {
+    #[serde(rename = "@ParameterByteOrder", default)]
+    pub parameter_byte_order: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Allocators {
+    #[serde(rename = "Allocator", default)]
+    pub items: Vec<Allocator>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct Allocator {
+    #[serde(rename = "@Id", default)]
+    pub id: String,
+    #[serde(rename = "@Name", default)]
+    pub name: String,
+    #[serde(rename = "@Start", default)]
+    pub start: String,
+    #[serde(rename = "@maxInclusive", default)]
+    pub max_inclusive: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ParameterCalculations {
+    #[serde(rename = "ParameterCalculation", default)]
+    pub items: Vec<ParameterCalculation>,
+}
+
+/// A `<ParameterCalculation>`: ETS runs `LRTransformation` whenever one of
+/// the `LParameters` changes and writes the results to the `RParameters`
+/// (the aliases name the script variables).
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ParameterCalculation {
+    #[serde(rename = "@Id", default)]
+    pub id: String,
+    #[serde(rename = "@Name", default)]
+    pub name: String,
+    #[serde(rename = "@Language", default)]
+    pub language: String,
+    #[serde(rename = "LRTransformation", default)]
+    pub lr_transformation: String,
+    #[serde(rename = "RLTransformation", default)]
+    pub rl_transformation: String,
+    #[serde(rename = "LParameters", default)]
+    pub l_parameters: Option<CalculationParameters>,
+    #[serde(rename = "RParameters", default)]
+    pub r_parameters: Option<CalculationParameters>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct CalculationParameters {
+    #[serde(rename = "ParameterRefRef", default)]
+    pub items: Vec<crate::dynamic::ParameterRefRef>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -175,6 +262,15 @@ pub struct ParameterRef {
     pub ref_id: String,
     #[serde(rename = "@Access", default)]
     pub access: String,
+    /// Default value override for the referenced parameter (empty = use
+    /// `Parameter/@Value`).
+    #[serde(rename = "@Value", default)]
+    pub value: Option<String>,
+    /// Label override (empty = use `Parameter/@Text`).
+    #[serde(rename = "@Text", default)]
+    pub text: String,
+    #[serde(rename = "@SuffixText", default)]
+    pub suffix_text: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -218,6 +314,8 @@ pub struct ComObjectRef {
     pub read_on_init_flag: String,
     #[serde(rename = "@DatapointType", default)]
     pub datapoint_type: String,
+    #[serde(rename = "@Priority", default)]
+    pub priority: String,
 }
 
 /// Reusable parameter/GO definitions, instantiated per channel.
@@ -283,6 +381,17 @@ pub struct ParameterType {
     pub text: Option<TypeText>,
     #[serde(rename = "TypeIPAddress", default)]
     pub ip_address: Option<TypeIpAddress>,
+    #[serde(rename = "TypeFloat", default)]
+    pub float: Option<TypeFloat>,
+    #[serde(rename = "TypeTime", default)]
+    pub time: Option<TypeTime>,
+    #[serde(rename = "TypeColor", default)]
+    pub color: Option<TypeColor>,
+    /// Display-only types without a memory representation.
+    #[serde(rename = "TypePicture", default)]
+    pub picture: Option<serde::de::IgnoredAny>,
+    #[serde(rename = "TypeNone", default)]
+    pub none: Option<serde::de::IgnoredAny>,
 }
 
 impl ParameterType {
@@ -296,6 +405,14 @@ impl ParameterType {
             "text"
         } else if self.ip_address.is_some() {
             "ip"
+        } else if self.float.is_some() {
+            "float"
+        } else if self.time.is_some() {
+            "time"
+        } else if self.color.is_some() {
+            "color"
+        } else if self.picture.is_some() || self.none.is_some() {
+            "none"
         } else {
             "unknown"
         }
@@ -311,6 +428,10 @@ impl ParameterType {
                     .and_then(|r| r.size_in_bit.parse().ok())
             })
             .or_else(|| self.text.as_ref().and_then(|t| t.size_in_bit.parse().ok()))
+            .or_else(|| self.time.as_ref().and_then(|t| t.size_in_bit.parse().ok()))
+            .or_else(|| self.float.as_ref().and_then(TypeFloat::size_in_bit))
+            .or_else(|| self.color.as_ref().map(|_| 24))
+            .or_else(|| self.ip_address.as_ref().map(|_| 32))
     }
 }
 
@@ -324,6 +445,50 @@ pub struct TypeNumber {
     pub min_inclusive: String,
     #[serde(rename = "@maxInclusive", default)]
     pub max_inclusive: String,
+    /// `CheckBox` for boolean checkboxes.
+    #[serde(rename = "@UIHint", default)]
+    pub ui_hint: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct TypeFloat {
+    /// `DPT 9` (KNX 2-octet float), `IEEE-754 Single` or `IEEE-754 Double`.
+    #[serde(rename = "@Encoding", default)]
+    pub encoding: String,
+    #[serde(rename = "@minInclusive", default)]
+    pub min_inclusive: String,
+    #[serde(rename = "@maxInclusive", default)]
+    pub max_inclusive: String,
+}
+
+impl TypeFloat {
+    pub fn size_in_bit(&self) -> Option<u32> {
+        match self.encoding.as_str() {
+            "DPT 9" => Some(16),
+            "IEEE-754 Single" => Some(32),
+            "IEEE-754 Double" => Some(64),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct TypeTime {
+    #[serde(rename = "@SizeInBit", default)]
+    pub size_in_bit: String,
+    #[serde(rename = "@Unit", default)]
+    pub unit: String,
+    #[serde(rename = "@minInclusive", default)]
+    pub min_inclusive: String,
+    #[serde(rename = "@maxInclusive", default)]
+    pub max_inclusive: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct TypeColor {
+    /// `RGB` or `HSV`; both are stored as three octets (`#RRGGBB`).
+    #[serde(rename = "@Space", default)]
+    pub space: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -344,6 +509,10 @@ pub struct Enumeration {
     pub text: String,
     #[serde(rename = "@Value", default)]
     pub value: String,
+    /// `Base="BinaryValue"` restrictions: base64 octets stored for this
+    /// choice.
+    #[serde(rename = "@BinaryValue", default)]
+    pub binary_value: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -408,6 +577,34 @@ pub struct Parameter {
     pub access: String,
     #[serde(rename = "Memory", default)]
     pub memory: Option<Memory>,
+    /// `<Property>`-backed parameter (stored in an interface object property
+    /// instead of memory).
+    #[serde(rename = "Property", default)]
+    pub property: Option<PropertyLocation>,
+    /// Union members only: byte offset relative to the union's `<Memory>`.
+    #[serde(rename = "@Offset", default)]
+    pub offset: String,
+    /// Union members only: bit offset relative to the union's `<Memory>`.
+    #[serde(rename = "@BitOffset", default)]
+    pub bit_offset: String,
+    /// Union members only: the member that is written when no member of the
+    /// union is visible.
+    #[serde(rename = "@DefaultUnionParameter", default)]
+    pub default_union_parameter: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct PropertyLocation {
+    #[serde(rename = "@ObjectIndex", default)]
+    pub object_index: String,
+    #[serde(rename = "@ObjectType", default)]
+    pub object_type: String,
+    #[serde(rename = "@PropertyId", default)]
+    pub property_id: String,
+    #[serde(rename = "@Offset", default)]
+    pub offset: String,
+    #[serde(rename = "@BitOffset", default)]
+    pub bit_offset: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -416,6 +613,8 @@ pub struct Union {
     pub size_in_bit: String,
     #[serde(rename = "Memory", default)]
     pub memory: Option<Memory>,
+    #[serde(rename = "Property", default)]
+    pub property: Option<PropertyLocation>,
     #[serde(rename = "Parameter", default)]
     pub parameters: Vec<Parameter>,
 }
@@ -477,6 +676,9 @@ pub struct ComObject {
     /// final ASAP is `BaseNumber value + Number`.
     #[serde(rename = "@BaseNumber", default)]
     pub base_number: String,
+    /// `Low` (default), `High` (= normal) or `Alert` (= urgent).
+    #[serde(rename = "@Priority", default)]
+    pub priority: String,
 }
 
 /// The `<Code>` element: a set of memory segments. Each segment is either an
@@ -522,6 +724,12 @@ pub struct Segment {
     /// base64 template; empty when the segment has no `<Data>`.
     #[serde(rename = "Data", default)]
     pub data: Option<String>,
+    /// base64 bit mask over `<Data>`: set bits mark the octets that are
+    /// significant when an image is compared with a device read-back (e.g.
+    /// the individual address in a GrAT is masked out). Not used for
+    /// download.
+    #[serde(rename = "Mask", default)]
+    pub mask: Option<String>,
 }
 
 impl Segment {
@@ -567,8 +775,15 @@ pub struct LoadProcedures {
 }
 
 /// One `<LoadProcedure>`: a heterogeneous sequence of load-control steps.
+///
+/// With `LoadProcedureStyle="ProductProcedure"` the application carries the
+/// complete procedure. With `MergedProcedure` each `<LoadProcedure MergeId>`
+/// is a fragment that is spliced into the mask's procedure from
+/// `knx_master.xml` at the matching `<LdCtrlMerge MergeId>`.
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct LoadProcedure {
+    #[serde(rename = "@MergeId", default)]
+    pub merge_id: String,
     #[serde(rename = "$value", default)]
     pub steps: Vec<LoadStep>,
 }
@@ -594,8 +809,134 @@ pub enum LoadStep {
     LoadCompleted(LdCtrlLoadCompleted),
     #[serde(rename = "LdCtrlCompareProp")]
     CompareProp(LdCtrlCompareProp),
+    #[serde(rename = "LdCtrlRelSegment")]
+    RelSegment(LdCtrlRelSegment),
+    #[serde(rename = "LdCtrlWriteRelMem")]
+    WriteRelMem(LdCtrlWriteRelMem),
+    #[serde(rename = "LdCtrlWriteProp")]
+    WriteProp(LdCtrlWriteProp),
+    #[serde(rename = "LdCtrlLoadImageProp")]
+    LoadImageProp(LdCtrlLoadImageProp),
+    #[serde(rename = "LdCtrlDelay")]
+    Delay(LdCtrlDelay),
+    #[serde(rename = "LdCtrlMerge")]
+    Merge(LdCtrlMerge),
+    #[serde(rename = "LdCtrlMapError")]
+    MapError(LdCtrlMapError),
+    /// Parameter-dependent steps (`<choose ParamRefId><when test>`), with the
+    /// same semantics as in the `Dynamic` tree.
+    #[serde(rename = "choose")]
+    Choose(LoadChoose),
+    /// Any other load control. Kept by name so the download planner can
+    /// refuse to build a plan it cannot execute.
     #[serde(other)]
     Other,
+}
+
+impl LoadStep {
+    /// The `AppliesTo` filter (`full`, `par`, `full,par`, …); empty = all.
+    pub fn applies_to(&self) -> &str {
+        match self {
+            LoadStep::RelSegment(s) => &s.applies_to,
+            LoadStep::WriteRelMem(s) => &s.applies_to,
+            LoadStep::WriteProp(s) => &s.applies_to,
+            LoadStep::CompareProp(s) => &s.applies_to,
+            LoadStep::LoadImageProp(s) => &s.applies_to,
+            _ => "",
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlRelSegment {
+    #[serde(rename = "@AppliesTo", default)]
+    pub applies_to: String,
+    #[serde(rename = "@LsmIdx", default)]
+    pub lsm_idx: String,
+    #[serde(rename = "@Size", default)]
+    pub size: String,
+    #[serde(rename = "@Mode", default)]
+    pub mode: String,
+    #[serde(rename = "@Fill", default)]
+    pub fill: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlWriteRelMem {
+    #[serde(rename = "@AppliesTo", default)]
+    pub applies_to: String,
+    #[serde(rename = "@ObjIdx", default)]
+    pub obj_idx: String,
+    #[serde(rename = "@Offset", default)]
+    pub offset: String,
+    #[serde(rename = "@Size", default)]
+    pub size: String,
+    #[serde(rename = "@Verify", default)]
+    pub verify: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlWriteProp {
+    #[serde(rename = "@AppliesTo", default)]
+    pub applies_to: String,
+    #[serde(rename = "@ObjIdx", default)]
+    pub obj_idx: String,
+    #[serde(rename = "@PropId", default)]
+    pub prop_id: String,
+    #[serde(rename = "@InlineData", default)]
+    pub inline_data: String,
+    #[serde(rename = "@Verify", default)]
+    pub verify: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlLoadImageProp {
+    #[serde(rename = "@AppliesTo", default)]
+    pub applies_to: String,
+    #[serde(rename = "@ObjIdx", default)]
+    pub obj_idx: String,
+    #[serde(rename = "@PropId", default)]
+    pub prop_id: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlDelay {
+    #[serde(rename = "@MilliSeconds", default)]
+    pub milliseconds: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LoadChoose {
+    #[serde(rename = "@ParamRefId", default)]
+    pub param_ref_id: String,
+    #[serde(rename = "when", default)]
+    pub whens: Vec<LoadWhen>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LoadWhen {
+    #[serde(rename = "@test", default)]
+    pub test: String,
+    #[serde(rename = "@default", default)]
+    pub default: String,
+    #[serde(rename = "$value", default)]
+    pub steps: Vec<LoadStep>,
+}
+
+/// Error mapping for the following steps: a device error `OriginalError`
+/// is treated as `MappedError` (0 = ignore).
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlMapError {
+    #[serde(rename = "@OriginalError", default)]
+    pub original_error: String,
+    #[serde(rename = "@MappedError", default)]
+    pub mapped_error: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlMerge {
+    #[serde(rename = "@MergeId", default)]
+    pub merge_id: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -626,6 +967,8 @@ pub struct LdCtrlTaskSegment {
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct LdCtrlCompareProp {
+    #[serde(rename = "@AppliesTo", default)]
+    pub applies_to: String,
     #[serde(rename = "@InlineData", default)]
     pub inline_data: String,
     #[serde(rename = "@ObjIdx", default)]

@@ -527,8 +527,8 @@ mod tests {
             restriction: Some(knx_prod::TypeRestriction {
                 size_in_bit: "1".into(),
                 enumerations: vec![
-                    knx_prod::Enumeration { id: "E-0".into(), text: "no".into(), value: "0".into() },
-                    knx_prod::Enumeration { id: "E-1".into(), text: "yes".into(), value: "1".into() },
+                    knx_prod::Enumeration { id: "E-0".into(), text: "no".into(), value: "0".into(), ..Default::default() },
+                    knx_prod::Enumeration { id: "E-1".into(), text: "yes".into(), value: "1".into(), ..Default::default() },
                 ],
                 ..Default::default()
             }),

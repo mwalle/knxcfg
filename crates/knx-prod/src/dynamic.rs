@@ -6,13 +6,14 @@
 //! - `ParameterBlock` groups parameters (title = `Text`).
 //! - `ParameterRefRef` references a `ParameterRef` (→ `Parameter`).
 //! - `ParameterSeparator` is a headline/group separator.
-//! - `choose ParamRefId=…` with `when test=…` children: a `when` is shown
-//!   when the referenced parameter's current value equals `test`; a
-//!   `when default="true"` is the fallback branch.
+//! - `choose ParamRefId=…` with `when test=…` children: every `when` whose
+//!   test matches the referenced parameter's value is shown; a
+//!   `when default="true"` is shown only if no test matches (see
+//!   [`crate::eval`]).
 //! - `Module` instantiates a `ModuleDef` with `TextArg`/`NumericArg`
 //!   arguments (channel label, base memory offset, …).
-//! - `Assign` sets another parameter's value as a side effect (used by
-//!   value computation, M2; ignored by the visibility walk in M1.5).
+//! - `Assign` sets another parameter's value while its branch is active
+//!   (evaluated by [`crate::eval`]).
 //! - `ComObjectRefRef` shows a group object entry.
 
 use serde::Deserialize;
@@ -149,6 +150,9 @@ pub struct NumericArg {
     pub ref_id: String,
     #[serde(rename = "@Value", default)]
     pub value: String,
+    /// Dynamic allocation (`Value` is computed by ETS from the allocator).
+    #[serde(rename = "@AllocatorRefId", default)]
+    pub allocator_ref_id: String,
 }
 
 /// A node in the `Dynamic` tree. Unknown element types are ignored.

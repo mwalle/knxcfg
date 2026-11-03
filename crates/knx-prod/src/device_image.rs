@@ -317,7 +317,8 @@ pub fn download_plan(ap: &ApplicationProgram, image: &DeviceImage) -> Result<Vec
                     data,
                 });
             }
-            crate::LoadStep::Other => {}
+            // Not planned yet (RelSegment, WriteProp, choose, ...).
+            _ => {}
         }
     }
 
@@ -462,6 +463,7 @@ mod tests {
             }),
             load_procedures: Some(crate::LoadProcedures {
                 items: vec![crate::LoadProcedure {
+                    merge_id: String::new(),
                     steps: vec![
                         crate::LoadStep::Connect,
                         crate::LoadStep::Unload(crate::LdCtrlUnload { lsm_idx: "1".into() }),

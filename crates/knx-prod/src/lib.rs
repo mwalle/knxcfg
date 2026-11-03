@@ -25,12 +25,16 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub use app::{
-    ApplicationProgram, Argument, Arguments, Code, ComObject, ComObjectRef, ComObjectRefs,
-    ComObjects, ComObjectTable, Enumeration, Language, Languages, LdCtrlAbsSegment,
-    LdCtrlCompareProp, LdCtrlLoad, LdCtrlLoadCompleted, LdCtrlTaskSegment, LdCtrlUnload,
-    LoadProcedure, LoadProcedures, LoadStep, Memory, ModuleDef, ModuleDefs, ParamNode, Parameter,
-    ParameterRef, ParameterRefs, ParameterType, ParameterTypes, Parameters, Segment, Static, Table,
-    Translation, TranslationElement, TranslationUnit, TypeNumber, TypeRestriction, TypeText, Union,
+    Allocator, Allocators, AppOptions, ApplicationProgram, Argument, Arguments,
+    CalculationParameters, Code, ComObject, ComObjectRef, ComObjectRefs, ComObjects,
+    ComObjectTable, Enumeration, Language, Languages, LdCtrlAbsSegment, LdCtrlCompareProp,
+    LdCtrlDelay, LdCtrlLoad, LdCtrlLoadCompleted, LdCtrlLoadImageProp, LdCtrlMapError, LdCtrlMerge,
+    LdCtrlRelSegment, LdCtrlTaskSegment, LdCtrlUnload, LdCtrlWriteProp, LdCtrlWriteRelMem,
+    LoadChoose, LoadProcedure, LoadProcedures, LoadStep, LoadWhen, Memory, ModuleDef, ModuleDefs, ParamNode, Parameter,
+    ParameterCalculation, ParameterCalculations, ParameterRef, ParameterRefs, ParameterType,
+    ParameterTypes, Parameters, PropertyLocation, Segment, Static, Table, Translation,
+    TranslationElement, TranslationUnit, TypeColor, TypeFloat, TypeNumber, TypeRestriction,
+    TypeText, TypeTime, Union,
 };
 pub use device_image::{
     build_device_image, download_plan, read_back_device, DeviceConfiguration, DeviceImage,
