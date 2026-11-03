@@ -115,7 +115,7 @@ pub fn build_parameter_image(
         .unwrap_or_default();
     if let Some(dynamic) = &ap.dynamic {
         let mut instances = Vec::new();
-        collect_module_instances(&dynamic.nodes, &modules, &mut instances);
+        collect_module_instances(&dynamic.nodes, &modules, "", &mut instances);
         for located in instances {
             write_module_parameters(
                 located.instance,
@@ -210,7 +210,7 @@ pub fn decode_parameter_image(
         .unwrap_or_default();
     if let Some(dynamic) = &ap.dynamic {
         let mut instances = Vec::new();
-        collect_module_instances(&dynamic.nodes, &modules, &mut instances);
+        collect_module_instances(&dynamic.nodes, &modules, "", &mut instances);
         for located in instances {
             read_module_parameter_values(
                 located.instance,
@@ -224,6 +224,61 @@ pub fn decode_parameter_image(
     }
 
     Ok(values)
+}
+
+/// Enumerate every parameter instance and its knxprod default value.
+///
+/// Keys match the form/TUI ids: device parameters use the bare `param.id`,
+/// module parameters use `module-instance-id/param-id` (nested modules are
+/// slash-separated). This is used to keep the project YAML minimal: a value
+/// that equals this default is redundant and is not persisted.
+pub fn parameter_defaults(ap: &ApplicationProgram) -> HashMap<String, String> {
+    let mut out = HashMap::new();
+
+    if let Some(static_) = &ap.static_ {
+        push_static_defaults(static_, "", &mut out);
+    }
+
+    let modules: HashMap<&str, &ModuleDef> = ap
+        .module_defs
+        .as_ref()
+        .map(|m| m.items.iter().map(|m| (m.id.as_str(), m)).collect())
+        .unwrap_or_default();
+    if let Some(dynamic) = &ap.dynamic {
+        let mut instances = Vec::new();
+        collect_module_instances(&dynamic.nodes, &modules, "", &mut instances);
+        for located in instances {
+            if let Some(static_) = &located.module.static_ {
+                push_static_defaults(static_, &located.prefix, &mut out);
+            }
+        }
+    }
+
+    out
+}
+
+fn push_static_defaults(static_: &Static, prefix: &str, out: &mut HashMap<String, String>) {
+    let Some(parameters) = &static_.parameters else {
+        return;
+    };
+    for param in parameters.parameters() {
+        let id = if prefix.is_empty() {
+            param.id.clone()
+        } else {
+            format!("{prefix}/{}", param.id)
+        };
+        out.insert(id, param.value.clone());
+    }
+    for union in parameters.unions() {
+        for param in &union.parameters {
+            let id = if prefix.is_empty() {
+                param.id.clone()
+            } else {
+                format!("{prefix}/{}", param.id)
+            };
+            out.insert(id, param.value.clone());
+        }
+    }
 }
 
 /// Decoded template bytes per segment id.
@@ -323,41 +378,53 @@ struct LocatedModule<'a> {
     prefix: String,
 }
 
-/// Recursively collect every `Module` instance in a `Dynamic` tree, following
-/// `ChannelIndependentBlock`/`Channel`/`ParameterBlock` and the *visible*
-/// branch of each `choose`/`when` (same rules as the form engine: exact
-/// `test` match first, then the `default="true"` branch).
+/// Recursively collect every `Module` instance in a `Dynamic` tree.
+///
+/// Memory allocation is static: every module instance occupies its own
+/// pre-allocated region (its `BaseOffset` argument), so *all* `when` branches
+/// are materialized regardless of UI visibility. Nested module instances are
+/// descended into and their parameter ids are prefixed exactly like the form
+/// engine (`parent-instance-id/child-instance-id/param-id`).
 fn collect_module_instances<'a>(
     nodes: &'a [UiNode],
     modules: &HashMap<&str, &'a ModuleDef>,
+    prefix: &str,
     out: &mut Vec<LocatedModule<'a>>,
 ) {
     for node in nodes {
         match node {
             UiNode::Module(instance) => {
                 if let Some(module) = modules.get(instance.ref_id.as_str()) {
+                    let new_prefix = join_prefix(prefix, &instance.id);
                     out.push(LocatedModule {
                         instance,
                         module,
-                        prefix: instance.id.clone(),
+                        prefix: new_prefix.clone(),
                     });
+                    if let Some(dynamic) = &module.dynamic {
+                        collect_module_instances(&dynamic.nodes, modules, &new_prefix, out);
+                    }
                 }
             }
             UiNode::Choose(choose) => {
-                // Memory allocation is static: every module instance occupies
-                // its own pre-allocated region (its `BaseOffset` argument), so
-                // *all* `when` branches are materialized regardless of UI
-                // visibility.
                 for when in &choose.whens {
-                    collect_module_instances(&when.nodes, modules, out);
+                    collect_module_instances(&when.nodes, modules, prefix, out);
                 }
             }
             _ => {
                 if let Some(children) = node.children() {
-                    collect_module_instances(children, modules, out);
+                    collect_module_instances(children, modules, prefix, out);
                 }
             }
         }
+    }
+}
+
+fn join_prefix(prefix: &str, id: &str) -> String {
+    if prefix.is_empty() {
+        id.to_string()
+    } else {
+        format!("{prefix}/{id}")
     }
 }
 
@@ -933,6 +1000,13 @@ mod tests {
         assert_eq!(
             decoded.get("MD-1_M-1/MD-1_P-1").map(String::as_str),
             Some("7")
+        );
+
+        let defaults = parameter_defaults(&ap);
+        assert_eq!(defaults.get("P-1").map(String::as_str), Some("1"));
+        assert_eq!(
+            defaults.get("MD-1_M-1/MD-1_P-1").map(String::as_str),
+            Some("42")
         );
     }
 }
