@@ -2,30 +2,28 @@
 
 ## Resolution
 
-The GoT is produced by **overlaying flags onto the knxprod `<ComObjectTable>`
-template**. The template (`AS-4400`, 104 bytes = 26 × 4-octet records) is the
-source of every non-flag octet *and* of the flag defaults:
+The GoT is produced by **overlaying the config octets onto the knxprod
+`<ComObjectTable>` template**. The template (`AS-4400`, 104 bytes) has the
+`03_05_01 §4.18.9.1` layout `[count:1][RAM-flags pointer:2]` followed by
+4-octet descriptors `[data pointer:2][config:1][type:1]` in ASAP order.
 
-- record 0 is a **header** whose first octet is the **entry count** (`0x19`
-  = 25 GO slots, `03_05_01 §4.18.3.1` “Current Size”);
-- records 1..entry-count are the GO slots, in ASAP order (`record = ASAP + 1`).
+ETS reads the count, then for each descriptor either
 
-ETS does **not** scan the template for a placeholder octet. It reads the entry
-count from the header, then for each GO slot either
-
-1. writes the **resolved `ComObjectRef` flags** (visible object), or
-2. keeps the **template's own slot flags with the communication bit cleared**
-   (hidden/inactive object).
+1. writes the **resolved `ComObjectRef` config** (and type) (active object),
+   or
+2. keeps the **template's config with the communication bit cleared**
+   (inactive object).
 
 ## Template (from knxprod `AS-4400`)
 
 ```
-rec  0: 19 07 00 07   ← header: entry count 0x19 = 25, then 07 00 07
-rec  1: 1a df 00 07   ← ASAP 0
-rec  2: 22 df 00 07   ← ASAP 1
+19 | 07 00             ← 25 objects, RAM-flags table at 0x0700
+07 1a df 00            ← ASAP 0:  value at 0x071A, config DF, type 0 (1 bit)
+07 22 df 00            ← ASAP 1
 ...
-rec 24: 4f df 00 07   ← ASAP 23
-rec 25: 50 df 00 00   ← ASAP 24 (Mode/“In Betrieb”)
+07 4f df 00            ← ASAP 23
+07 50 df 00            ← ASAP 24 (Mode/"In Betrieb")
+00                     ← trailing octet
 ```
 
 ## Flags octet (RT2 config octet, `03_05_01 §4.18.4.1`)
@@ -54,14 +52,17 @@ Verified against the experiment (`/tmp/experiment.txt`, current state GO0 comm
 cleared):
 
 ```
-rec  1 (ASAP 0,  Zustand senden, comm cleared): 4B
-rec  6 (ASAP 5,  Sperrobjekt,    unlinked):      D3
-rec  7 (ASAP 6,  Zustand senden, linked):        4F
-rec 15 (ASAP 14, Logik 1 Ausgang, unlinked):     4B
-rec 24 (ASAP 23, Logik 4 Ausgang, linked):       4F
-rec 25 (ASAP 24, In Betrieb,      unlinked):     4B
-all others (hidden):                             DB
+ASAP 0  (Zustand senden, comm cleared): 4B
+ASAP 5  (Sperrobjekt,    unlinked):      D3
+ASAP 6  (Zustand senden, linked):        4F
+ASAP 14 (Logik 1 Ausgang, unlinked):     4B
+ASAP 23 (Logik 4 Ausgang, linked):       4F
+ASAP 24 (In Betrieb,      unlinked):     4B
+all others (hidden):                     DB
 ```
+
+`crates/knx-prod/tests/oracle.rs` reproduces the linked/unlinked cases with
+Logic 4 enabled and cyclic "Operation" on.
 
 ## Visibility
 
@@ -79,7 +80,8 @@ The ETS oracle project (`/tmp/test.knxproj`) shows GOs `0, 5, 6, 14, 23, 24`
 visible; the remaining 19 are hidden. This is parameter-dependent (per-channel
 function, per-logic enable, cyclic “Operation”), so reproducing the exact set
 needs the project's parameter values (M2 `.knxproj` import). With knxprod
-defaults `knxcfg tables` correctly shows only GO 0 and GO 6.
+defaults only GO 0 and GO 6 are active (all matching `when` branches are
+evaluated, see `crates/knx-prod/src/eval.rs`).
 
 ## Code changes landed
 
@@ -87,10 +89,10 @@ defaults `knxcfg tables` correctly shows only GO 0 and GO 6.
   selector = 0; value-read-on-init is not encoded), no priority.
 - `tables::visible_group_object_flags` — resolved flags + template slot
   priority, comm cleared when unlinked.
-- `tables::group_object_table_entry_count` — reads the header's entry-count
-  octet.
-- `tables::overlay_group_object_table(_at)` — keyed by ASAP; skips the header
-  record, writes hidden slots as `template slot flags & !0x04`.
+- `tables::group_object_table_entry_count` — reads the count octet.
+- `tables::overlay_group_object_table` — keyed by ASAP over the
+  `§4.18.9.1` descriptors; writes config + type for active objects and
+  `template config & !0x04` for inactive ones.
 - `tables::active_group_objects` — only emits visible objects (module + device
   level), honoring the no-`ComObjectRefs` fallback.
 - `device_image::build_device_image` — passes final flags bytes keyed by ASAP,

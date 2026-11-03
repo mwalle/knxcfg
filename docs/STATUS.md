@@ -30,34 +30,42 @@ D14 product store: project `vendor/` (default) + global
 - Observed knxprod/`.knxproj` facts: `docs/knxprod-format.md`, `docs/plan.md`.
 
 ## Workspace (crates/)
-- `knx-core` — typed model: `IndividualAddress`, `GroupAddress` (string
-  serde), `Project`, `Area/Line/DeviceRef`, `GroupAddressEntry`,
-  `DeviceInstance { parameters, links }`, `Project::sort()`.
-- `knx-store` — YAML persistence, deterministic ordering.
+- `knx-core` — typed model: `IndividualAddress` (reserved `x.y.0` /
+  `15.15.255` rejected for devices), `GroupAddress` (3-level storage; parses
+  3-level, 2-level `main/sub` and free `raw`), `Project`,
+  `Area/Line/DeviceRef`, `GroupAddressEntry`, `DeviceInstance { parameters,
+  links }`, `GroupObjectLink { object_number, ga, send }`, `Project::sort()`.
+- `knx-store` — YAML persistence, deterministic ordering; `save` removes the
+  files of devices that are no longer in the project.
   Files: `knx.yaml`, `topology.yaml`, `groups.yaml`, `devices/<ia>.yaml`.
-- `knx-prod` — knxprod parser: catalog, hardware (h2p→app), application
-  program (parameter types/params/unions, group objects, module defs),
-  `Dynamic` tree (pages/`choose`/`when`/`Module`), `<Languages>` translations.
-  M5: `<Code>` segments (absolute/relative, base64→bytes), `Memory/@BaseOffset`,
-  `AddressTable`/`AssociationTable` headers, and `build_parameter_image` +
-  `check_template` (device-level parameter overlay + template self-check).
-  Module `BaseOffset` instantiation done: module parameters are overlaid at
-  `argument base + Memory.Offset` for every `Module` instance (all `when`
-  branches, since memory allocation is static).
-- `knx-form` — form engine: `evaluate(ap, values, lang) -> Vec<FormPage>`
-  (`FormPage { title, sections }`; `FormField { id, label, kind, value,
-  enabled }`; `FieldKind::{Checkbox, Enum, Number, Text}`). Resolves
-  visibility (`choose`/`when`), expands modules, localizes labels
-  (translation → `@Text` → `@Name`), hides `Access="None"`, disables
-  `Access="ReadOnly"`, substitutes `{{ChNo}}`/`{{0}}`. Module titles come
-  from the instance `Name`, falling back to the module def's top-level
-  `ParameterBlock` `Text` template (`{{ChNo}}` = the instance's `ChNo`
-  argument — text or numeric — e.g. "Logic 1..4").
-- `knx-transport` — stub only: `CemiFrame` encode/decode + `Transport` trait.
-- `knxcfg` — CLI (`main.rs`, `product_store.rs`) + TUI (`tui.rs`, ratatui):
-  panes shown as a tab row; enums open a popup listing every value as
-  `label (value)`. `product_store` resolves an h2p to a knxprod file
-  (explicit `--knxprod` → recorded path → project `vendor/` → global store).
+- `knx-prod` — knxprod parser and download builder:
+  - `eval` — **the** parameter evaluator used by form, memory and tables:
+    all matching `when`s, comparison tests, `ParameterRef/@Value` defaults,
+    `Assign`, `ParameterCalculation` (small JS subset, `calc.rs`), active
+    union members, active `ComObjectRef`s and module instances. Keys:
+    `P-3` / `MD-2_M-2/MD-2_P-26` in projects (app-id prefix stripped,
+    `short_key`/`full_key`).
+  - `memory` — parameter image; strict value encoding (enumerations, ranges,
+    field widths, DPT 9 / IEEE floats, time, color, IPv4, binary values),
+    little-endian option, active alternatives win shared memory.
+  - `tables` — System 7 (mask 0701/0705, memory mapped, ETS5-confirmed) and
+    System B (mask 07B0, property based, spec-derived) GrAT/GrOAT/GoT;
+    sending GA first; `MaxEntries` and field-width checks.
+  - `device_image` — full image + `download_plan` for `ProductProcedure`
+    and `MergedProcedure` (mask procedure from `knx_master.xml`, `AppliesTo`,
+    `choose` in load procedures, `RelSegment`/`WriteRelMem`/`WriteProp`/
+    `LoadImageProp`/`Delay`/`MapError`); unknown load controls are errors.
+  - `master` — `knx_master.xml`: mask procedures, datapoint types.
+- `knx-form` — form engine on top of `eval`: `evaluate(ap, values, lang)`,
+  `validate(ap, id, value)`, `is_editable`. `FieldKind::Checkbox` only for
+  `UIHint="CheckBox"`; `ParameterRef` `Text`/`SuffixText` overrides; fields
+  set by `Assign` are read-only.
+- `knx-transport` — `CemiFrame`, `cemi::l_data_req` (TPCI and APCI share
+  the first TPDU octet), `apdu::*` (`A_Memory_Read/Write`,
+  `A_PropertyValue_Read/Write` with 12-bit start index, `A_Restart`, …),
+  `Transport` trait. No USB HID yet.
+- `knxcfg` — CLI (`main.rs`, `product_store.rs`, `download.rs` plan → cEMI
+  frames) + TUI (`tui.rs`; typed values are validated before they are taken).
 
 ## Commands (dir implicit except `init`; `-C <dir>` to override)
 ```
@@ -65,66 +73,48 @@ knxcfg init <dir>
 knxcfg list
 knxcfg import-product <file...> [--global]    # copy knxprod into vendor/ (default) or global store
 knxcfg catalog [<file>]                        # list store products (or one file)
-knxcfg group-add <ga> [--name N] [--dpt D]     group-rm <ga>
+knxcfg group-add <ga> [--name N] [--dpt D]     group-rm <ga> [--force]
 knxcfg add <h2p> <ia> [--name N] [--knxprod F] rm <ia>
-knxcfg link <ia> <object> <ga>                 unlink <ia> <object> <ga>
-knxcfg device-set <ia> <param-id> <value>
+knxcfg link <ia> <object> <ga> [--send]        unlink <ia> <object> <ga>
+knxcfg device-set <ia> <param> <value>         # validated; P-3 or MD-2_M-2/MD-2_P-26
 knxcfg edit <ia> [--knxprod <file>]            # TUI: Tab=pages, Enter=edit, s=save, q=quit
 knxcfg probe <h2p> | form <h2p> | memory <h2p> | tables <h2p>   [--knxprod <file>]
-knxcfg download <ia> [--knxprod <file>]        # M5 dry run: full image + plan + read-back self-check
+knxcfg download <ia> [--knxprod F] [--partial] [--frames]   # dry run: image, tables, plan
 ```
 knxprod files are resolved by h2p: `--knxprod` override → the path recorded at
-`add` time (D13) → project `vendor/` → global store
-(`$XDG_DATA_HOME/knxcfg/knxprod`, default `~/.local/share/knxcfg/knxprod`).
-`add` auto-creates Area/Line from the IA.
+`add` time (D13; relative to the project when the file is inside it) →
+project `vendor/` → global store (`$XDG_DATA_HOME/knxcfg/knxprod`, default
+`~/.local/share/knxcfg/knxprod`). `add` auto-creates Area/Line from the IA.
+`link` checks that the object exists, the GA is in `groups.yaml` and is not
+`0/0/0`, and warns on a DPT mismatch or an inactive object.
 
 ## Milestones
 Done: M0 skeleton · M1 knxprod parser · M1.5 form engine · M1.6 project
-editing + TUI (incl. translations, access filtering, pages).
-In progress: **M5** memory-image builder — code segments + device-parameter
-overlay + template self-check done (`knxcfg memory`); module `BaseOffset`
-instantiation done (`Argument/@Allocates` parsed); table builders done and
-ETS5-oracle-checked against a real download (`docs/ets5-findings.md`, ETS's
-`CommunicationTableFormatterSystem7`):
-- **GrAT** = `[len:1][IA:2][GA:2×N]` (big-endian, ascending)
-- **GrOAT** = `[len:1][TSAP:1][ASAP:1]×N`
-- **GoT** = 4 octets/GO `[data_pointer][flags][00][template]`, no length
-  prefix; 26 records = 1 header + 25 GO slots (`record = ASAP + 1`). Produced
-  by *overlaying flags onto the knxprod template*: the data pointer and the
-  trailing two octets are template-fixed; only the flags octet is rewritten
-  (Table 87 high octet, priority taken from the template placeholder,
-  communication cleared for unlinked objects).
-- GO ASAP = `base + Number` (`BaseObj`/`ObjNumberBase`/`BaseNumber` args),
-  verified: Eingang A=0–5, B=6–11, Logic=12–23, "In Betrieb"=24.
-Done since: full device image assembly (`knx_prod::build_device_image`) —
-parameter image + GrAT/GrOAT/GoT overlaid at their knxprod header offsets —
-and the active-mode GO filter (`tables::active_group_objects`, choose/when
-visibility + parameter values). The inverse read-back path is also in place:
-`memory::decode_parameter_image`, `tables::read_links`, and
-`read_back_device`. The knxprod `<LoadProcedures>` element is parsed and
-`download_plan` now emits the device's exact load sequence (`LdCtrlConnect`,
-`LdCtrlUnload/Load/AbsSegment/TaskSegment/LoadCompleted`, `LdCtrlRestart`,
-`LdCtrlDisconnect`) with the assembled segment bytes attached.
-`knxcfg download <ia>` is a dry run that prints the assembled segments, the
-load-procedure plan, and a read-back self-check against the project values.
-Remaining: encoding the plan steps as real `A_Memory_Write`/
-`A_PropertyValue_Write` cEMI messages over the transport, device read-back,
-and byte-identity vs ETS (oracle).
-Next: **M2** `.knxproj` import (clean-room RE) · **M3** `.knxproj` export ·
-**M4** USB cEMI transport (`09_03 §3`) · rest of **M5** (download + read-back,
-byte-identical to ETS as oracle) · **M6** hardening.
+editing + TUI.
+**M5** (download builder): the parameter image, tables and plan are built
+for all five sample products (System 7 and System B). The System 7 tables are
+checked against the ETS5 oracle (`crates/knx-prod/tests/oracle.rs`); the
+parameter image and the System B tables are spec/knxprod-derived and not yet
+compared with an ETS download. The plan is encoded as cEMI frames
+(`download --frames`) except `LdCtrlWriteRelMem`, which needs the device's
+`PID_TABLE_REFERENCE` at run time.
+Next: **M4** USB cEMI transport (`09_03 §3`) and live download/read-back ·
+**M2** `.knxproj` import (also the way to get ETS parameter images to compare
+against) · **M3** `.knxproj` export · **M6** hardening.
 
 ## Known loose ends
-- GO linking uses `object_number` only. The download path filters to the
-  active mode via `tables::active_group_objects` (choose/when visibility +
-  parameter values); `tables::group_objects` still exists for enumerating
-  *all* possible GOs (`docs/ets5-findings.md`).
-- knxprod resolution no longer needs a path per command: files are found by
-  h2p in the product store (global + project `vendor/`). The absolute path is
-  still recorded at `add` time as a fast path / fallback.
+- Not supported (reported, not silent): KNX Data Secure (download only works
+  with security off), `Allocator`-based module arguments, `<Property>`
+  parameters other than the device hardware checks, calculations outside
+  the JS subset (KLIC's Steinhart-Hart tables), coupler/IA programming.
+- Unverified against ETS: System B table bytes, the partial download, the
+  communication flag of unlinked System B objects, rounding of calculation
+  results into integer parameters, the content of table segments behind the
+  table end (the template residue is kept).
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
-`cargo build --offline` · `cargo test --offline` (29 tests).
+`cargo build --offline` · `cargo test --offline` (58 tests, incl. the ETS5
+oracle regression test that reads `refs/knxprod`).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),
 zip, base64, clap, anyhow, thiserror, ratatui 0.28, crossterm 0.27.

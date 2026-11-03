@@ -23,15 +23,20 @@ GroupObject table at $4400: 19 07 00 07 1A 4F 00 07 22 DB 00 07 ... (26 × 4 oct
 ### Association Table (GrOAT, format 0)
 
 - `[length:1][TSAP:1][ASAP:1] × N` — length is **1 octet**. TSAP = 1-based
-  index into the (sorted) GrAT; ASAP = group object number (1-based).
+  index into the (sorted) GrAT; ASAP = the knxprod `ComObject/@Number`
+  (**0-based** in this application: `00` = GO0).
 - `03 01 00 02 06 03 17` = `0/0/10`→GO0, `0/0/11`→GO6, `0/0/12`→GO23 (0x17).
 
 ### Group Object Table (GoT)
 
-- **No length prefix.** The first record is a 4-octet **header** whose first
-  octet is the entry count (`0x19` = 25 GO slots). Each following record is a
-  GO: `[data_pointer][flags][00][vft]`, in ASAP order (`record = ASAP + 1`).
-- `flags` uses the `03_05_01 §4.18.4.1` RT2 config octet bit layout
+- Layout per `03_05_01 §4.18.9.1` (mask 0701h/0705h, 16-bit pointers):
+  `[count:1][RAM-flags table pointer:2]`, then one 4-octet descriptor per
+  object in ASAP order: `[data pointer:2][config:1][type:1]`.
+- The oracle bytes read as `19 | 07 00 | 07 1A 4F 00 | 07 22 DB 00 | …`:
+  25 objects, RAM-flags table at `0x0700`, GO0 value at `0x071A` with config
+  `4F`, type `00` (1 bit), GO1 value at `0x0722`, config `DB`, …
+  104 octets = 1 + 2 + 25 × 4 + 1 trailing octet.
+- The config octet uses the `03_05_01 §4.18.4.1` RT2 bit layout
   (0x80 update, 0x40 transmit, 0x20 segment-selector, 0x10 write, 0x08 read,
   0x04 comm, 0x03 priority). The knxprod template carries `0xDF` (all flags
   on, segment selector 0, low priority) in every GO slot; ETS overwrites it
@@ -45,45 +50,27 @@ GroupObject table at $4400: 19 07 00 07 1A 4F 00 07 22 DB 00 07 ... (26 × 4 oct
 | AS-4201 | 0x4201  | 511  | AssociationTable (GrOAT) |
 | AS-4400 | 0x4400  | 104  | ComObjectTable (GoT) |
 | AS-4468 | 0x4468  | 168  | Application program (EEPROM params) |
-| AS-0700 | 0x0700  | 82   | Application program (flash) |
+| AS-0700 | 0x0700  | 82   | RAM (`MemType=2`, `Access=0`): RAM-flags table and group object values. Allocated by the load procedure, not written |
 
 The GrAT/GrOAT/GoT download via `A_Memory_Write` to the segment addresses; the
 load state is driven by `A_PropertyValue_Write` to PropertyId 5
 (LoadStateControl): 01=Start, 03=RelativeAllocation, 02=Complete, 04=Unload.
 
-## The `word0` octet — SOLVED: it is the **Data Pointer**
+## Data pointers — template-fixed
 
-`word0` is the 1-octet **Data Pointer** of the Group Object Descriptor
-(`03_05_01 §4.18.3.1.2`): it points to the MSB of the Group Object's value in
-its data segment (RAM/EEPROM). The segment is selected by the **Segment
-Selector** bit (bit 5) of the Config octet: `0` → segment `00h`, `1` → segment
-`100h`. So `word0` is the GO's **value address/offset** in its data segment.
+The data pointers (`0x071A`, `0x0722`, …) are 16-bit addresses inside the
+application's RAM segment `AS-0700` (`0x0700`–`0x0751`); the RAM-flags table
+starts at `0x0700`. They are **byte-identical** between the knxprod template
+and the ETS download, so they are not computed: the GoT is produced by
+overlaying the config (and type) octet of each descriptor onto the template.
+(An earlier reading of the GoT as `[data_pointer:1][flags][00][vft]` records
+behind a 4-octet "header record" was off by one octet; it put the flags at
+the same offsets by coincidence. The "8-byte slot stride" seen in that reading
+is simply the spacing of 16-bit RAM addresses.)
 
-**Crucially, comparing the knxprod template against ETS's download shows the
-`data_pointer` is byte-identical in every record — ETS only rewrites the
-flags octet.** So the data pointer is **not computed at all**; it is baked into
-the knxprod `ComObjectTable` segment template. The GoT is produced by overlaying
-flags onto the template keyed by ASAP (record index = ASAP + 1), exactly like
-`build_parameter_image` overlays parameter values onto the `<Code>` templates.
-
-This explains the observed strides: the header record's entry-count octet
-(`0x19` = 25) is followed by GO0 at `0x1A`, and 4-byte objects sit on 8-byte
-slots (`0x22, 0x2A, 0x32, …`), reflecting the device's value-area allocation.
-
-Full System-B (mask 0705) memory-mapped descriptor is therefore **4 octets**:
-```
-[Data Pointer:1][Flags:1][0x00:1][template octet:1]
-```
-- The **flags** octet is the `03_05_01 §4.18.4.1` RT2 config octet
-  (`0x80` update, `0x40` transmit, `0x20` segment-selector, `0x10` write,
-  `0x08` read, `0x04` comm, `0x03` priority). Bit 5 is the **segment selector**
-  (0 = segment 00h), *not* the System-B “value read on init” flag — that
-  feature is not supported by this memory-mapped layout (greyed out in ETS).
-- The last two octets are **not computed**: they are carried verbatim from the
-  knxprod template (`00 07` for the GO slots, `00 00` for the Mode slot). ETS
-  only overlays the flags octet.
-  `tables.rs::overlay_group_object_table(template, flags_by_asap)` implements
-  this.
+ETS names the formatter `CommunicationTableFormatterSystem7`: mask 0705h is
+**System 7** (BIM M112). System B is mask 07B0h, which uses property-based
+tables (`03_05_01 §4.16.8 / §4.17.5 / §4.18.6`), see `crates/knx-prod/src/tables.rs`.
 
 ## Module GO ASAP enumeration — mostly done, one caveat
 
@@ -101,9 +88,8 @@ per-instance stride base and its `Allocates` is the per-instance stride.
   Logic output `Ausgangslogik 1`) — matching the GrOAT `GO 23 ↔ 0/0/12`.
 
 Caveats:
-- The GoT has 26 records: one leading header record plus 25 GO slots. Record
-  index = ASAP + 1 (header at record 0, `19 07 00 07`); record 25 is the
-  device GO "In Betrieb" (ASAP 24), not padding. Confirmed against ETS: the
+- The GoT has 25 descriptors (ASAP 0–24); descriptor 24 is the device GO
+  "In Betrieb", not padding. Confirmed against ETS: the
   "Inputs grouped" mode (`MD-1`) and the single-input mode (`MD-2`, "Eingang
   A"/"Eingang B") are mutually exclusive — only the active mode's objects
   appear in the Kommunikationsobjekte pane.

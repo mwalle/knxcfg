@@ -110,15 +110,32 @@ Form-engine rules (`crates/knx-form`):
 - Labels resolve: translation → `@Text` → `@Name` (this removes the raw
   `OM_`-style internal names from the UI).
 
-Not yet parsed (download builder, M2/M5):
+Evaluation (`knx-prod::eval`, shared by the form, the memory image and the
+tables):
 
-- `LoadProcedures` contents (load-sequence ops) — parsed in M5 as
-  `LoadProcedures`/`LoadProcedure`/`LoadStep` and emitted by
-  `knx_prod::download_plan`.
-- `Assign` value computation (M2).
-- The exact `ComObjectTable` *memory* byte format — the knxprod segment
-  (e.g. `AS-4400` on the Time Switch) packs descriptors with the DPT, not the
-  plain 2-octet runtime GO descriptor (see below).
+- **Every** `when` whose `test` matches is active; `default` only if none
+  matches. Tests are value lists (`"0 1 2"`) or one comparison (`<5`, `<=3`,
+  `>0`, `>=12`, `!=0`).
+- A parameter's default is the `@Value` of its active `ParameterRef` (MDT
+  encodes channel modes into hidden `Access="None"` parameters this way),
+  else of its first ref with a `Value`, else `Parameter/@Value`.
+- `Assign` (constant `Value` or `SourceParamRefRef`) forces its target while
+  its branch is active; `ParameterCalculation` `LRTransformation` scripts run
+  when one of their inputs has a user value (small JavaScript subset; loops,
+  arrays and strings are reported as not evaluated).
+- The written member of a `<Union>` is the active one, else the
+  `DefaultUnionParameter`; member `Offset`/`BitOffset` are relative to the
+  union's `<Memory>`.
+- `<Options ParameterByteOrder="LittleEndian">` (System B) makes multi-octet
+  numbers little-endian.
+- `<Property>`-backed parameters on the device object (PID 78/15) are the
+  hardware checks ETS performs before a download (`CompareProp`).
+
+Load procedures: `LoadProcedureStyle="ProductProcedure"` carries the full
+procedure; `"MergedProcedure"` carries `LoadProcedure MergeId` fragments that
+are merged into the mask's procedure from `knx_master.xml`
+(`MaskVersion/HawkConfigurationData/Procedures`), filtered by `AppliesTo`
+(`full`/`par`). Load procedures may contain `choose`/`when`.
 
 ### M5 memory image (in progress)
 
@@ -141,7 +158,7 @@ assumption to confirm against ETS5), and instantiates module parameters:
 
 ### M5 table builders (`knx-prod::tables`)
 
-The three System B tables are built per `03_05_01 §4.16/4.17/4.18` and are
+Mask 0701h/0705h (**System 7**, BIM M112) tables are memory mapped and
 **byte-confirmed against ETS5** (`docs/ets5-findings.md`):
 
 - **Group Address Table** — `[len:1][IA:2][GA:2×N]`, GAs big-endian and
@@ -149,9 +166,19 @@ The three System B tables are built per `03_05_01 §4.16/4.17/4.18` and are
 - **Association Table** (format 0) — `[len:1][TSAP:1][ASAP:1]×N`; TSAP is
   1-based, ASAP is the **0-based** group object number (ETS writes `00 06 17`
   for GO0/GO6/GO23).
-- **Group Object Table** — no length prefix; one 4-octet descriptor per record
-  `[data_pointer][flags][00][vft]`. The data pointer is baked into the knxprod
-  template; only the flags octet is overlaid at download time.
+- **Group Object Table** (`03_05_01 §4.18.9.1`) —
+  `[count:1][RAM-flags pointer:2]` + `[data pointer:2][config:1][type:1]`
+  per object. Pointers are baked into the knxprod template; config and type
+  octets are overlaid at download time.
+
+Mask 07B0h (**System B**) tables are property based and written through
+their table objects (`LdCtrlWriteRelMem ObjIdx=1/2/3`): GrAT RT 7
+`[len:2][GA:2]…`, GrOAT RT 6 format 1 `[len:2]([TSAP:2][ASAP:2])…`, GoT RT 7
+`[len:2]([config:1][type:1])…` for ASAP 1..n (spec-derived, not yet checked
+against an ETS download).
+
+The sending group address of an object is its first association
+(`03_05_01 §4.17.5.2.5`); `knxcfg link --send` puts it first.
 
 `knxcfg tables` dumps the overlaid GO table and the *visible* ASAP numbering
 (`active_group_objects`, choose/when filtered). `knx_prod::build_device_image`
@@ -160,12 +187,10 @@ offsets; `knx_prod::read_back_device` decodes the image back to parameters
 and links. `knxcfg download <ia>` is a dry run that prints the result, the
 `A_Memory_Write`/load-control plan, and a read-back self-check.
 
-`knxcfg memory <knxprod> <h2p>` prints the segment map, the parameter
-placements, a hex dump of the parameter segments, and a template self-check.
-The self-check compares the freshly-encoded knxprod defaults against the
-shipped template; on the MDT Universal Interface it reports that the non-zero
-`Value` defaults (e.g. `startupTimeout` value `2` at byte 0 vs template
-`0x0000`, `DebounceTime` `30` vs `0x32`) do **not** round-trip through the
-shipped segment template. This is the concrete M5 work list to resolve
-against the ETS5 oracle (value encoding, `Assign` computation, scaling, or a
-stale template in the knxprod).
+`knxcfg memory <h2p>` prints the segment map, the parameter placements, a
+hex dump of the parameter segments, and where the default image differs from
+the shipped template. The template is the manufacturer's factory image (ETS
+overwrites every parameter position), so the list is informational, not a
+work list: only a comparison with an ETS download shows whether a byte is
+right. Segment `<Mask>` data (which template octets are significant for a
+read-back comparison) is parsed but not used for download.
