@@ -13,9 +13,11 @@
 //! See `docs/knxprod-format.md` for the observed structure.
 
 mod app;
+mod calc;
 mod catalog;
 pub mod device_image;
 mod dynamic;
+pub mod eval;
 mod hardware;
 mod master;
 pub mod memory;
@@ -41,6 +43,7 @@ pub use device_image::{
     build_device_image, download_plan, read_back_device, DeviceConfiguration, DeviceImage,
     DownloadStep, TablePlacement,
 };
+pub use eval::Evaluation;
 pub use master::{DatapointSubtype, DatapointType, MasterData, MaskProcedure, MaskVersion};
 pub use memory::{
     build_parameter_image, check_template, parameter_defaults, MemoryImage, Placement, SegmentImage,
