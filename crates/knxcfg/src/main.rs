@@ -106,8 +106,14 @@ enum Cmd {
     Export,
     /// Import an ETS .knxproj file (M2)
     Import { file: PathBuf },
-    /// Download the configuration to a device (M5)
-    Download,
+    /// Build and (M4: send) the download image for a device (M5 dry run)
+    Download {
+        /// Individual address, e.g. 1.1.1
+        ia: String,
+        /// knxprod file (defaults to the one recorded at `add` time)
+        #[arg(long)]
+        knxprod: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -154,7 +160,10 @@ fn main() -> Result<()> {
         }
         Cmd::Export => bail!("`export` is not implemented yet (M3)"),
         Cmd::Import { .. } => bail!("`import` is not implemented yet (M2)"),
-        Cmd::Download => bail!("`download` is not implemented yet (M5)"),
+        Cmd::Download { ia, knxprod } => {
+            let dir = resolve_project(project.as_deref())?;
+            cmd_download(&dir, &ia, knxprod.as_deref())
+        }
     }
 }
 
@@ -489,20 +498,48 @@ fn all_com_objects(s: &knx_prod::Static) -> Vec<knx_prod::ComObject> {
 ///
 /// Uses the knxprod group objects only (no project links), so the address and
 /// association tables are empty; the group object table shows the device's
-/// group objects as they would be encoded.
+/// *visible* group objects as they would be encoded, with flags overlaid onto
+/// the shipped knxprod GoT template (data pointers preserved).
 fn cmd_tables(file: &PathBuf, h2p: &str) -> Result<()> {
+    use std::collections::HashMap;
+
     let knxprod = knx_prod::KnxProd::open(file)
         .with_context(|| format!("reading {}", file.display()))?;
     let ap = knxprod
         .application_program(h2p)
         .with_context(|| format!("resolving {h2p}"))?;
 
-    let objects = knx_prod::tables::group_objects(&ap);
-    println!("{}: {} group object(s)", ap.name, objects.len());
+    let values = HashMap::new();
+    let objects = knx_prod::tables::active_group_objects(&ap, &values);
+    println!("{}: {} visible group object(s)", ap.name, objects.len());
 
-    let descriptors: Vec<knx_prod::tables::GroupObject> =
-        objects.iter().map(|(_, o)| o.clone()).collect();
-    let got = knx_prod::tables::build_group_object_table(&descriptors);
+    let got = if let Some(t) = ap
+        .static_
+        .as_ref()
+        .and_then(|s| s.com_object_table.as_ref())
+    {
+        if let Some(seg) = ap
+            .static_
+            .as_ref()
+            .and_then(|s| s.code.as_ref())
+            .and_then(|c| c.by_id(&t.code_segment))
+        {
+            let flags: HashMap<usize, knx_prod::tables::GroupObjectFlags> = objects
+                .iter()
+                .map(|(asap, obj)| (*asap as usize, obj.flags))
+                .collect();
+            let offset = t.offset.parse::<usize>().unwrap_or(0);
+            knx_prod::tables::overlay_group_object_table_at(&seg.decoded_data(), offset, &flags)
+        } else {
+            let descriptors: Vec<knx_prod::tables::GroupObject> =
+                objects.iter().map(|(_, o)| o.clone()).collect();
+            knx_prod::tables::build_group_object_table(&descriptors)
+        }
+    } else {
+        let descriptors: Vec<knx_prod::tables::GroupObject> =
+            objects.iter().map(|(_, o)| o.clone()).collect();
+        knx_prod::tables::build_group_object_table(&descriptors)
+    };
 
     println!("\nGroup Object Table ({} bytes):", got.len());
     for (i, chunk) in got.chunks(16).enumerate() {
@@ -510,25 +547,149 @@ fn cmd_tables(file: &PathBuf, h2p: &str) -> Result<()> {
         println!("  {:04x}  {}", i * 16, hex.join(" "));
     }
 
-    println!("\nASAP numbering (module instances expanded):");
+    println!("\nASAP numbering (visible module instances):");
     for (asap, obj) in &objects {
         println!(
             "  #{:<4} flags={:02x} vft={}",
-            asap, go_flags_byte(obj.flags), obj.value_field_type
+            asap,
+            knx_prod::tables::go_descriptor_high(obj.flags),
+            obj.value_field_type
         );
     }
     Ok(())
 }
 
-fn go_flags_byte(f: knx_prod::tables::GroupObjectFlags) -> u8 {
-    let mut b = 0u8;
-    if f.update { b |= 0x80; }
-    if f.transmit { b |= 0x40; }
-    if f.read_on_init { b |= 0x20; }
-    if f.write { b |= 0x10; }
-    if f.read { b |= 0x08; }
-    if f.communicate { b |= 0x04; }
-    b
+/// Build the full device download image and print the plan (M5 dry run).
+///
+/// The actual bus transfer (`A_Memory_Write` + load-control sequence over the
+/// USB cEMI tunnel) is M4 transport work; until then this exercises and
+/// displays the complete memory image the download path will send.
+fn cmd_download(dir: &Path, ia_str: &str, knxprod_override: Option<&Path>) -> Result<()> {
+    use std::collections::HashMap;
+
+    let ia: IndividualAddress = ia_str.parse().with_context(|| format!("invalid IA {ia_str}"))?;
+    let project = knx_store::load(dir)?;
+
+    let device_ref = project
+        .topology
+        .iter()
+        .flat_map(|a| a.lines.iter())
+        .flat_map(|l| l.devices.iter())
+        .find(|d| d.ia == ia)
+        .ok_or_else(|| anyhow::anyhow!("device {ia} not found in topology"))?;
+    let h2p = device_ref.hardware.clone();
+    let knxprod_path = match knxprod_override {
+        Some(p) => p.to_path_buf(),
+        None => PathBuf::from(
+            device_ref
+                .knxprod
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("device {ia} has no knxprod recorded; pass --knxprod <file>"))?,
+        ),
+    };
+
+    let kp = knx_prod::KnxProd::open(&knxprod_path)
+        .with_context(|| format!("reading {}", knxprod_path.display()))?;
+    let ap = kp
+        .application_program(&h2p)
+        .with_context(|| format!("resolving {h2p}"))?;
+
+    let dev = project
+        .devices
+        .iter()
+        .find(|d| d.ia == ia)
+        .ok_or_else(|| anyhow::anyhow!("device instance {ia} not found"))?;
+
+    let mut values: HashMap<String, String> = HashMap::new();
+    for p in &dev.parameters {
+        values.insert(p.id.clone(), yaml_to_string(&p.value));
+    }
+    let links: Vec<(u16, u16)> = dev
+        .links
+        .iter()
+        .map(|l| (l.object_number, l.ga.to_u16()))
+        .collect();
+
+    let image = knx_prod::build_device_image(&ap, &values, &links)?;
+
+    println!("Download image for {ia} ({})", device_ref.name);
+    println!("{} segment(s):", image.segments.len());
+    for seg in &image.segments {
+        let addr = if seg.address.is_empty() {
+            "-".to_string()
+        } else {
+            format!("0x{:04x}", seg.address.parse::<u32>().unwrap_or(0))
+        };
+        let mem = if seg.memory_type.is_empty() { "flash" } else { &seg.memory_type };
+        println!(
+            "  {:<44} {}  {:>5} bytes  {}",
+            seg.id, addr, seg.size, mem
+        );
+    }
+
+    println!("\nActive group objects: {}", image.active_group_objects.len());
+    for (asap, obj) in &image.active_group_objects {
+        println!(
+            "  #{:<4} flags={:02x} vft={}",
+            asap,
+            knx_prod::tables::go_descriptor_high(obj.flags),
+            obj.value_field_type
+        );
+    }
+
+    let mut dumped: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for t in [
+        image.address_table.as_ref(),
+        image.association_table.as_ref(),
+        image.group_object_table.as_ref(),
+    ]
+    .into_iter()
+    .flatten()
+    {
+        dumped.insert(t.segment_id.as_str());
+    }
+    if !dumped.is_empty() {
+        println!("\nHex dump (table segments):");
+        for seg in &image.segments {
+            if !dumped.contains(seg.id.as_str()) {
+                continue;
+            }
+            println!("\n--- {} ({}) ---", seg.id, seg.memory_type);
+            for (i, chunk) in seg.data.chunks(16).enumerate() {
+                let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+                println!("  {:04x}  {}", i * 16, hex.join(" "));
+            }
+        }
+    }
+
+    println!("\nDownload plan (dry run — cEMI transport lands in M4):");
+    for seg in &image.segments {
+        let meta = ap
+            .static_
+            .as_ref()
+            .and_then(|s| s.code.as_ref())
+            .and_then(|c| c.by_id(&seg.id));
+        if seg.address.is_empty() {
+            let lsm = meta.map(|s| s.load_state_machine.as_str()).unwrap_or("");
+            let rel = meta.map(|s| s.offset.as_str()).unwrap_or("");
+            println!(
+                "  A_Memory_Write        segment {:<12} LoadStateMachine={:<10} Offset={:<6} len={}",
+                seg.id, lsm, rel, seg.size
+            );
+        } else {
+            let addr = seg.address.parse::<u32>().unwrap_or(0);
+            println!(
+                "  A_Memory_Write        address 0x{addr:04x}  len={}",
+                seg.size
+            );
+        }
+    }
+    println!("  A_PropertyValue_Write PropertyId=5 (LoadStateControl) = 01 Start");
+    println!("  A_PropertyValue_Write PropertyId=5 (LoadStateControl) = 03 RelativeAllocation");
+    println!("  A_PropertyValue_Write PropertyId=5 (LoadStateControl) = 02 Complete");
+    println!("  A_PropertyValue_Write PropertyId=5 (LoadStateControl) = 04 Unload");
+    println!("\n(not sent — USB cEMI transport is not implemented yet)");
+    Ok(())
 }
 
 fn cmd_add(dir: &Path, knxprod_path: &Path, h2p: &str, ia_str: &str, name: Option<&str>) -> Result<()> {

@@ -139,25 +139,23 @@ assumption to confirm against ETS5), and instantiates module parameters:
 
 ### M5 table builders (`knx-prod::tables`)
 
-The three System B tables are built per `03_05_01 §4.16/4.17/4.18`:
+The three System B tables are built per `03_05_01 §4.16/4.17/4.18` and are
+**byte-confirmed against ETS5** (`docs/ets5-findings.md`):
 
-- **Group Address Table** (Realisation Type 7): 2-octet BE length + sorted
-  16-bit group addresses (TSAP = 1-based index).
-- **Association Table** (Realisation Type 6, format 0): 2-octet BE length +
-  2-octet entries `TSAP` (high) `ASAP` (low), both 1-based; ASAP = group
-  object number, TSAP = index into the Group Address Table.
-- **Group Object Table** (Realisation Type 7): 2-octet BE length + 2-octet
-  descriptors (flags in the high octet, `ObjectSize` → value-field-type in the
-  low octet).
+- **Group Address Table** — `[len:1][IA:2][GA:2×N]`, GAs big-endian and
+  ascending, length counts the IA. TSAP = 1-based index into this list.
+- **Association Table** (format 0) — `[len:1][TSAP:1][ASAP:1]×N`; TSAP is
+  1-based, ASAP is the **0-based** group object number (ETS writes `00 06 17`
+  for GO0/GO6/GO23).
+- **Group Object Table** — no length prefix; one 4-octet descriptor per record
+  `[data_pointer][flags][00][vft]`. The data pointer is baked into the knxprod
+  template; only the flags octet is overlaid at download time.
 
-`knxcfg tables` dumps the GO table and ASAP numbering. Two things still need
-ETS5-oracle confirmation: the module GO ASAP *numbering universe*
-(`BaseNumber + Number` across module instances vs device-level `Number`), and
-the `ComObjectTable` memory format — the shipped segment (e.g. 880 bytes for
-the Time Switch = 440 descriptors) is **not** the 2-octet runtime descriptor;
-it packs the DPT (`DatapointType`) into each entry, so the 6-octet System-300
-style (`§4.18.5.2.4`: 2-octet config + 4-octet DPT) is the likely layout to
-reverse-engineer.
+`knxcfg tables` dumps the overlaid GO table and the *visible* ASAP numbering
+(`active_group_objects`, choose/when filtered). `knx_prod::build_device_image`
+combines the parameter image with the three tables at their knxprod header
+offsets; `knxcfg download <ia>` is a dry run that prints the result and the
+`A_Memory_Write`/load-control plan.
 
 `knxcfg memory <knxprod> <h2p>` prints the segment map, the parameter
 placements, a hex dump of the parameter segments, and a template self-check.

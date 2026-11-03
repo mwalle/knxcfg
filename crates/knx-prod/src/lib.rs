@@ -14,6 +14,7 @@
 
 mod app;
 mod catalog;
+pub mod device_image;
 mod dynamic;
 mod hardware;
 pub mod memory;
@@ -30,6 +31,7 @@ pub use app::{
     Table, Translation, TranslationElement, TranslationUnit, TypeNumber, TypeRestriction,
     TypeText, Union,
 };
+pub use device_image::{build_device_image, DeviceImage, TablePlacement};
 pub use memory::{build_parameter_image, check_template, MemoryImage, Placement, SegmentImage};
 pub use dynamic::{
     Arg, Assign, Channel, ChannelIndependentBlock, Choose, ComObjectRefRef, Dynamic,

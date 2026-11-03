@@ -7,26 +7,29 @@
 //! the entries themselves are empty in knxprod).
 //!
 //! The entry formats follow the KNX System B realisations (source:
-//! `03_05_01 §4.16/4.17/4.18`):
+//! `03_05_01 §4.16/4.17/4.18`) and are **byte-confirmed against ETS5**
+//! (`docs/ets5-findings.md`):
 //!
-//! - **Group Address Table** — Realisation Type 7 (`§4.16.8`): a 2-octet
-//!   current length followed by that many 16-bit group addresses, sorted
-//!   ascending. The TSAP (connection number) is `1` for the first entry.
-//! - **Association Table** — Realisation Type 6, format 0 (`§4.17.5`): a
-//!   2-octet current length followed by 2-octet associations
-//!   `TSAP` (high octet) `ASAP` (low octet), both 1-based. `ASAP` is the
-//!   group object number; `TSAP` indexes the Group Address Table.
-//! - **Group Object Table** — Realisation Type 7 (`§4.18.6`): a 2-octet
-//!   current length followed by 2-octet group object descriptors (flags in
-//!   the high octet, value field type in the low octet).
+//! - **Group Address Table** — a **1-octet** length (counting the individual
+//!   address), a 2-octet IA, then the 16-bit group addresses (big-endian,
+//!   ascending). TSAP = 1-based index into this list.
+//! - **Association Table** — a **1-octet** length followed by 2-octet
+//!   associations `TSAP` (high octet) `ASAP` (low octet). TSAP is 1-based;
+//!   ASAP is the **0-based** group object number (ETS writes `00 06 17` for
+//!   GO0/GO6/GO23).
+//! - **Group Object Table** — **no length prefix**; one 4-octet descriptor per
+//!   record `[data_pointer][flags][00][vft]`, produced by overlaying flags onto
+//!   the knxprod template.
 //!
 //! All multi-octet integers are **big-endian**, matching the KNX spec's
-//! `PDT_UNSIGNED_INT` / 16-bit field convention. (Byte-identity against the
-//! ETS5 oracle is still to be confirmed — see `check_*` helpers.)
+//! `PDT_UNSIGNED_INT` / 16-bit field convention.
 
 use std::collections::HashMap;
 
-use crate::{ApplicationProgram, ModuleDef, ModuleInstance, UiNode};
+use crate::{
+    ApplicationProgram, Choose, ModuleDef, ModuleInstance, Parameter, ParameterRef, Static, UiNode,
+    When,
+};
 
 /// One entry of the Association Table (GrOAT format 0).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -34,8 +37,8 @@ pub struct Association {
     /// Transport Service Access Point: 1-based index into the Group Address
     /// Table (0 = none / unused).
     pub tsap: u16,
-    /// Application Service Access Point: 1-based group object number
-    /// (0 = none / unused).
+    /// Application Service Access Point: 0-based group object number
+    /// (0 = GO0).
     pub asap: u16,
 }
 
@@ -57,12 +60,23 @@ pub struct DeviceTables {
 /// address; any group object without a link is associated with TSAP 0
 /// (unused). `ga_dpt` is ignored here — only the 16-bit address matters.
 pub fn build_device_tables(objects: &[GroupObject], links: &[(u16, u16)]) -> DeviceTables {
-    // Collect the set of referenced group addresses, in ascending order, to
-    // form the Group Address Table. TSAP = 1-based index into this list.
+    let (address, association) = build_address_and_association_tables(links);
+    let group_objects = build_group_object_table(objects);
+    DeviceTables { address, association, group_objects }
+}
+
+/// Build the Group Address Table and Association Table from the project links.
+///
+/// Each `link` is `(ASAP, group address)`; ASAP is the 0-based group object
+/// number (the same numbering returned by [`group_objects`]), and the group
+/// address is already in its raw 16-bit form. The GrAT carries the distinct
+/// GAs in ascending order; the GrOAT entries reference them by TSAP
+/// (1-based index into the GrAT).
+pub fn build_address_and_association_tables(links: &[(u16, u16)]) -> (Vec<u8>, Vec<u8>) {
     let mut gas: Vec<u16> = links.iter().map(|&(_, ga)| ga).collect();
     gas.sort_unstable();
     gas.dedup();
-    let tsap_of: std::collections::HashMap<u16, u16> = gas
+    let tsap_of: HashMap<u16, u16> = gas
         .iter()
         .enumerate()
         .map(|(i, &ga)| (ga, i as u16 + 1))
@@ -78,9 +92,7 @@ pub fn build_device_tables(objects: &[GroupObject], links: &[(u16, u16)]) -> Dev
         .collect();
     let association = build_association_table(associations);
 
-    let group_objects = build_group_object_table(objects);
-
-    DeviceTables { address, association, group_objects }
+    (address, association)
 }
 
 /// Build the list of `GroupObject` descriptors (and their absolute ASAP
@@ -97,12 +109,32 @@ pub fn build_device_tables(objects: &[GroupObject], links: &[(u16, u16)]) -> Dev
 /// modes overlap in ASAP space; the *active* mode is chosen by `choose`/`when`
 /// visibility against the project's parameter values — a downstream concern
 /// for the download builder (`docs/ets5-findings.md`).
-pub fn group_objects(
+pub fn group_objects(ap: &ApplicationProgram) -> Vec<(u16, GroupObject)> {
+    group_objects_impl(ap, &HashMap::new(), false)
+}
+
+/// Like [`group_objects`], but only materializes the `Dynamic` module
+/// instances that are actually visible for the given parameter `values`
+/// (following `choose`/`when` branches).
+///
+/// This is the enumeration the download builder must use: mutually-exclusive
+/// channel modes share ASAP space, and only the active mode's objects are
+/// downloaded (`docs/ets5-findings.md`).
+pub fn active_group_objects(
     ap: &ApplicationProgram,
+    values: &HashMap<String, String>,
+) -> Vec<(u16, GroupObject)> {
+    group_objects_impl(ap, values, true)
+}
+
+fn group_objects_impl(
+    ap: &ApplicationProgram,
+    values: &HashMap<String, String>,
+    visible_only: bool,
 ) -> Vec<(u16, GroupObject)> {
     let mut out = Vec::new();
 
-    // Device-level group objects.
+    // Device-level group objects are always present.
     if let Some(static_) = &ap.static_ {
         if let Some(t) = &static_.com_object_table {
             for co in &t.items {
@@ -119,46 +151,75 @@ pub fn group_objects(
         .map(|m| m.items.iter().map(|m| (m.id.as_str(), m)).collect())
         .unwrap_or_default();
     if let Some(dynamic) = &ap.dynamic {
-        let mut instances = Vec::new();
-        collect_module_instances(&dynamic.nodes, &modules, &mut instances);
-        for (instance, module) in instances {
-            let Some(static_) = &module.static_ else {
-                continue;
-            };
-            let Some(com_objs) = &static_.com_objects else {
-                continue;
-            };
-            for co in &com_objs.items {
-                let number = co.number.parse::<u16>().unwrap_or(0);
-                // BaseNumber argument default 0 (device-level of the module).
-                let base = if co.base_number.is_empty() {
-                    0
-                } else {
-                    instance
-                        .arg_value(&co.base_number)
-                        .and_then(|v| v.parse::<u16>().ok())
-                        .unwrap_or(0)
-                };
-                out.push((base + number, group_object_of(co)));
-            }
+        if visible_only {
+            let ctx = build_table_ctx(ap.static_.as_ref());
+            let mut instances = Vec::new();
+            collect_visible_module_instances(
+                &dynamic.nodes,
+                &ctx,
+                &modules,
+                values,
+                "",
+                &mut instances,
+            );
+            push_module_group_objects(&instances, &mut out);
+        } else {
+            let mut instances = Vec::new();
+            collect_module_instances(&dynamic.nodes, &modules, &mut instances);
+            push_module_group_objects(&instances, &mut out);
         }
     }
 
+    out.sort_by_key(|(asap, _)| *asap);
+    if visible_only {
+        // Visible modes should not overlap in ASAP space; the all-objects
+        // enumeration intentionally keeps every possible object, including
+        // mutually-exclusive modes that share the same ASAP.
+        out.dedup_by_key(|(asap, _)| *asap);
+    }
     out
 }
 
-/// Collect every module instance (instance + its `ModuleDef`) from a `Dynamic`
-/// tree, descending into all `when` branches (memory allocation is static).
+fn push_module_group_objects(
+    instances: &[(&ModuleInstance, &ModuleDef, String)],
+    out: &mut Vec<(u16, GroupObject)>,
+) {
+    for (instance, module, _prefix) in instances {
+        let Some(static_) = &module.static_ else {
+            continue;
+        };
+        let Some(com_objs) = &static_.com_objects else {
+            continue;
+        };
+        for co in &com_objs.items {
+            let number = co.number.parse::<u16>().unwrap_or(0);
+            // BaseNumber argument default 0 (device-level of the module).
+            let base = if co.base_number.is_empty() {
+                0
+            } else {
+                instance
+                    .arg_value(&co.base_number)
+                    .and_then(|v| v.parse::<u16>().ok())
+                    .unwrap_or(0)
+            };
+            out.push((base + number, group_object_of(co)));
+        }
+    }
+}
+
+/// Collect every module instance from a `Dynamic` tree, descending into all
+/// `when` branches (memory allocation is static, so every instance exists in
+/// memory even when it is not shown in the ETS dialog).
 fn collect_module_instances<'a>(
     nodes: &'a [UiNode],
     modules: &HashMap<&str, &'a ModuleDef>,
-    out: &mut Vec<(&'a ModuleInstance, &'a ModuleDef)>,
+    out: &mut Vec<(&'a ModuleInstance, &'a ModuleDef, String)>,
 ) {
     for node in nodes {
         match node {
             UiNode::Module(instance) => {
                 if let Some(module) = modules.get(instance.ref_id.as_str()) {
-                    out.push((instance, module));
+                    out.push((instance, module, instance.id.clone()));
                 }
             }
             UiNode::Choose(choose) => {
@@ -173,6 +234,135 @@ fn collect_module_instances<'a>(
             }
         }
     }
+}
+
+/// Parameter/ref lookup for the `Dynamic` tree whose module instances we are
+/// enumerating (device-level or a module definition).
+struct TableCtx<'a> {
+    params: HashMap<String, &'a Parameter>,
+    refs: HashMap<String, &'a ParameterRef>,
+}
+
+fn build_table_ctx<'a>(static_: Option<&'a Static>) -> TableCtx<'a> {
+    let mut ctx = TableCtx {
+        params: HashMap::new(),
+        refs: HashMap::new(),
+    };
+    let Some(s) = static_ else {
+        return ctx;
+    };
+    if let Some(p) = &s.parameters {
+        for param in p.parameters() {
+            ctx.params.insert(param.id.clone(), param);
+        }
+        for u in p.unions() {
+            for param in &u.parameters {
+                ctx.params.insert(param.id.clone(), param);
+            }
+        }
+    }
+    if let Some(pr) = &s.parameter_refs {
+        for r in &pr.items {
+            ctx.refs.insert(r.id.clone(), r);
+        }
+    }
+    ctx
+}
+
+/// Collect the module instances in the *visible* branch of each `choose`/
+/// `when`, mirroring the form engine's visibility rules.
+fn collect_visible_module_instances<'a>(
+    nodes: &'a [UiNode],
+    ctx: &TableCtx,
+    modules: &HashMap<&str, &'a ModuleDef>,
+    values: &HashMap<String, String>,
+    prefix: &str,
+    out: &mut Vec<(&'a ModuleInstance, &'a ModuleDef, String)>,
+) {
+    for node in nodes {
+        match node {
+            UiNode::Module(instance) => {
+                if let Some(module) = modules.get(instance.ref_id.as_str()) {
+                    let new_prefix = join_prefix(prefix, &instance.id);
+                    out.push((instance, module, new_prefix.clone()));
+                    if let Some(dynamic) = &module.dynamic {
+                        let module_ctx = build_table_ctx(module.static_.as_ref());
+                        collect_visible_module_instances(
+                            &dynamic.nodes,
+                            &module_ctx,
+                            modules,
+                            values,
+                            &new_prefix,
+                            out,
+                        );
+                    }
+                }
+            }
+            UiNode::Choose(choose) => {
+                if let Some(when) = pick_visible_when(choose, ctx, values, prefix) {
+                    collect_visible_module_instances(
+                        &when.nodes,
+                        ctx,
+                        modules,
+                        values,
+                        prefix,
+                        out,
+                    );
+                }
+            }
+            _ => {
+                if let Some(children) = node.children() {
+                    collect_visible_module_instances(
+                        children,
+                        ctx,
+                        modules,
+                        values,
+                        prefix,
+                        out,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn join_prefix(prefix: &str, id: &str) -> String {
+    if prefix.is_empty() {
+        id.to_string()
+    } else {
+        format!("{prefix}/{id}")
+    }
+}
+
+fn pick_visible_when<'a>(
+    choose: &'a Choose,
+    ctx: &TableCtx,
+    values: &HashMap<String, String>,
+    prefix: &str,
+) -> Option<&'a When> {
+    let current = current_param_value(ctx, &choose.param_ref_id, values, prefix);
+    choose
+        .whens
+        .iter()
+        .find(|w| !w.is_default() && w.test == current)
+        .or_else(|| choose.whens.iter().find(|w| w.is_default()))
+}
+
+fn current_param_value(
+    ctx: &TableCtx,
+    ref_id: &str,
+    values: &HashMap<String, String>,
+    prefix: &str,
+) -> String {
+    let Some(param_id) = ctx.refs.get(ref_id).map(|r| r.ref_id.clone()) else {
+        return String::new();
+    };
+    values
+        .get(&format!("{prefix}/{param_id}"))
+        .cloned()
+        .or_else(|| values.get(&param_id).cloned())
+        .or_else(|| ctx.params.get(&param_id).map(|p| p.value.clone()))
+        .unwrap_or_default()
 }
 
 fn group_object_of(co: &crate::ComObject) -> GroupObject {
@@ -317,7 +507,7 @@ pub fn build_association_table(mut assocs: Vec<Association>) -> Vec<u8> {
 
 /// Build the Group Object Table (Realisation Type 7) bytes.
 ///
-/// One 4-octet descriptor per group object, in ASAP order (index 0 → ASAP 1).
+/// One 4-octet descriptor per group object, in ASAP order (index 0 → ASAP 0).
 /// Confirmed against ETS5 (mask 0705): **no length prefix** — the segment is
 /// exactly `26 × 4 = 104` octets. The memory-mapped format is
 /// `[data_pointer][flags][00][vft]` (see `docs/ets5-findings.md`).
@@ -342,9 +532,19 @@ pub fn overlay_group_object_table(
     template: &[u8],
     flags_by_record: &std::collections::HashMap<usize, GroupObjectFlags>,
 ) -> Vec<u8> {
+    overlay_group_object_table_at(template, 0, flags_by_record)
+}
+
+/// Like [`overlay_group_object_table`], but the GoT starts at `base_offset`
+/// within `template` (the `ComObjectTable/@Offset`, usually 0).
+pub fn overlay_group_object_table_at(
+    template: &[u8],
+    base_offset: usize,
+    flags_by_record: &std::collections::HashMap<usize, GroupObjectFlags>,
+) -> Vec<u8> {
     let mut out = template.to_vec();
     for (idx, flags) in flags_by_record {
-        let offset = idx * 4;
+        let offset = base_offset + idx * 4;
         if offset + 1 < out.len() {
             out[offset + 1] = go_descriptor_high(*flags);
         }
@@ -367,7 +567,7 @@ pub fn overlay_group_object_table(
 ///
 /// NOTE: this is the *memory* config octet, which differs from the 2-octet
 /// property descriptor in Table 87 (where bit 5 = Value Read on init).
-fn go_descriptor_high(f: GroupObjectFlags) -> u8 {
+pub fn go_descriptor_high(f: GroupObjectFlags) -> u8 {
     let mut b = 0u8;
     if f.update { b |= 0x80; }
     if f.transmit { b |= 0x40; }
@@ -456,5 +656,107 @@ mod tests {
         assert_eq!(&bytes[0..4], &[0x19, 0x04, 0x00, 0x08]);
         // second descriptor: [0x1a][0x00][0x00][0x00]
         assert_eq!(&bytes[4..8], &[0x1a, 0x00, 0x00, 0x00]);
+    }
+
+    #[test]
+    fn overlay_group_object_table_at_applies_base_offset() {
+        let template = [
+            0xAA, 0xAA, 0xAA, 0xAA, // prefix before GoT
+            0x19, 0xdf, 0x00, 0x07, 0x1a, 0xdf, 0x00, 0x07,
+        ];
+        let mut map = std::collections::HashMap::new();
+        map.insert(1, GroupObjectFlags { communicate: false, ..Default::default() });
+        let out = overlay_group_object_table_at(&template, 4, &map);
+        assert_eq!(&out[0..4], &[0xAA, 0xAA, 0xAA, 0xAA]);
+        assert_eq!(&out[4..8], &[0x19, 0xdf, 0x00, 0x07]);
+        assert_eq!(&out[8..12], &[0x1a, 0x00, 0x00, 0x07]);
+    }
+
+    #[test]
+    fn build_address_and_association_tables_matches_device_tables() {
+        let links = vec![(0u16, 0x000Au16), (6, 0x000B), (23, 0x000C)];
+        let (address, association) = build_address_and_association_tables(&links);
+        let device = build_device_tables(&[], &links);
+        assert_eq!(address, device.address);
+        assert_eq!(association, device.association);
+    }
+
+    #[test]
+    fn active_group_objects_respects_choose() {
+        let device_static = crate::Static {
+            parameters: Some(crate::Parameters {
+                nodes: vec![crate::ParamNode::Parameter(crate::Parameter {
+                    id: "P-1".into(),
+                    value: "0".into(),
+                    ..Default::default()
+                })],
+            }),
+            parameter_refs: Some(crate::ParameterRefs {
+                items: vec![crate::ParameterRef {
+                    id: "PR-1".into(),
+                    ref_id: "P-1".into(),
+                    ..Default::default()
+                }],
+            }),
+            ..Default::default()
+        };
+
+        let module_a = crate::ModuleDef {
+            id: "MD-A".into(),
+            static_: Some(crate::Static {
+                com_objects: Some(crate::ComObjects {
+                    items: vec![crate::ComObject { number: "0".into(), ..Default::default() }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let module_b = crate::ModuleDef {
+            id: "MD-B".into(),
+            static_: Some(crate::Static {
+                com_objects: Some(crate::ComObjects {
+                    items: vec![crate::ComObject { number: "0".into(), ..Default::default() }],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let ap = crate::ApplicationProgram {
+            static_: Some(device_static),
+            dynamic: Some(crate::Dynamic {
+                nodes: vec![crate::UiNode::Choose(crate::Choose {
+                    param_ref_id: "PR-1".into(),
+                    whens: vec![
+                        crate::When {
+                            test: "0".into(),
+                            nodes: vec![crate::UiNode::Module(crate::ModuleInstance {
+                                id: "M-A".into(),
+                                ref_id: "MD-A".into(),
+                                ..Default::default()
+                            })],
+                            ..Default::default()
+                        },
+                        crate::When {
+                            default: "true".into(),
+                            nodes: vec![crate::UiNode::Module(crate::ModuleInstance {
+                                id: "M-B".into(),
+                                ref_id: "MD-B".into(),
+                                ..Default::default()
+                            })],
+                            ..Default::default()
+                        },
+                    ],
+                })],
+            }),
+            module_defs: Some(crate::ModuleDefs { items: vec![module_a, module_b] }),
+            ..Default::default()
+        };
+
+        let mut values = std::collections::HashMap::new();
+        values.insert("P-1".to_string(), "0".to_string());
+        let active = active_group_objects(&ap, &values);
+        assert_eq!(active.len(), 1);
+        assert_eq!(active[0].0, 0);
     }
 }

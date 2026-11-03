@@ -96,6 +96,13 @@ impl GroupAddress {
         }
         Ok(Self { main, middle, sub })
     }
+
+    /// Raw 16-bit group address as carried in the Group Address Table and
+    /// cEMI `GroupAddress` field (3-level style: main is 5 bits, middle is
+    /// 3 bits, sub is 8 bits).
+    pub fn to_u16(self) -> u16 {
+        ((self.main as u16) << 11) | ((self.middle as u16) << 8) | self.sub as u16
+    }
 }
 
 impl fmt::Display for GroupAddress {
@@ -311,5 +318,13 @@ mod tests {
         v.sort();
         assert_eq!(v[0].to_string(), "1/0/0");
         assert_eq!(v[2].to_string(), "2/0/0");
+    }
+
+    #[test]
+    fn group_address_raw_encoding() {
+        // 0/0/10 → main=0 (5 bits), middle=0 (3 bits), sub=10 (8 bits).
+        assert_eq!(GroupAddress::new(0, 0, 10).unwrap().to_u16(), 0x000A);
+        // 1/2/3 → 1<<11 | 2<<8 | 3 = 0x0800 | 0x0200 | 0x03 = 0x0A03.
+        assert_eq!(GroupAddress::new(1, 2, 3).unwrap().to_u16(), 0x0A03);
     }
 }

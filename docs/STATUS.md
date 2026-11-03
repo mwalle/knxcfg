@@ -66,6 +66,7 @@ knxcfg edit <ia> [--knxprod <file>]            # TUI: Tab=pages, Enter=edit, s=s
 knxcfg catalog <knxprod> | probe <knxprod> <h2p> | form <knxprod> <h2p>
 knxcfg memory <knxprod> <h2p>                      # M5: segments, placements, template check
 knxcfg tables <knxprod> <h2p>                      # M5: group-object table (ASAP + flags + vft)
+knxcfg download <ia> [--knxprod <file>]            # M5 dry run: full image + download plan
 ```
 `add` auto-creates Area/Line from the IA and records the canonical knxprod
 path in `DeviceRef.knxprod` (absolute — known portability tradeoff).
@@ -85,23 +86,28 @@ ETS5-oracle-checked against a real download (`docs/ets5-findings.md`, ETS's
   is baked into the template, not computed).
 - GO ASAP = `base + Number` (`BaseObj`/`ObjNumberBase`/`BaseNumber` args),
   verified: Eingang A=0–5, B=6–11, Logic=12–23, "In Betrieb"=24.
-Remaining: wire the table builders into the download path (segment overlay +
-`A_Memory_Write`/load-control sequence), read-back, byte-identity vs ETS.
+Done since: full device image assembly (`knx_prod::build_device_image`) —
+parameter image + GrAT/GrOAT/GoT overlaid at their knxprod header offsets —
+and the active-mode GO filter (`tables::active_group_objects`, choose/when
+visibility + parameter values). `knxcfg download <ia>` is a dry run that
+prints the assembled segments and the `A_Memory_Write`/load-control plan.
+Remaining: real `A_Memory_Write` + `A_PropertyValue_Write` PropertyId 5
+(LoadStateControl 01/03/02/04) over the transport, read-back, byte-identity
+vs ETS (oracle).
 Next: **M2** `.knxproj` import (clean-room RE) · **M3** `.knxproj` export ·
 **M4** USB cEMI transport (`09_03 §3`) · rest of **M5** (download + read-back,
 byte-identical to ETS as oracle) · **M6** hardening.
 
 ## Known loose ends
-- GO linking uses `object_number` only; the `group_objects()` enumerator
-  returns *all* possible GOs, including mutually-exclusive channel modes
-  ("Inputs grouped" vs "Eingang A/B"), so the download builder must filter to
-  the active mode via `choose`/`when` visibility + parameter values
-  (`docs/ets5-findings.md`).
+- GO linking uses `object_number` only. The download path filters to the
+  active mode via `tables::active_group_objects` (choose/when visibility +
+  parameter values); `tables::group_objects` still exists for enumerating
+  *all* possible GOs (`docs/ets5-findings.md`).
 - knxprod path is stored absolute (machine-local); `--knxprod` override exists;
   vendoring into `vendor/` is a later option.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
-`cargo build --offline` · `cargo test --offline` (19 tests).
+`cargo build --offline` · `cargo test --offline` (25 tests).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),
 zip, base64, clap, anyhow, thiserror, ratatui 0.28, crossterm 0.27.
