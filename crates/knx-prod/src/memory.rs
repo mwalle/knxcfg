@@ -21,7 +21,10 @@ use std::collections::HashMap;
 
 use anyhow::Result;
 
-use crate::{ApplicationProgram, Parameter, ParameterType, Static};
+use crate::{
+    ApplicationProgram, ModuleDef, ModuleInstance, ParamNode, Parameter, ParameterType, Static,
+    UiNode,
+};
 
 /// A built memory image: one byte buffer per code segment, plus the
 /// placements that were written into it.
@@ -98,49 +101,31 @@ pub fn build_parameter_image(
     });
 
     let mut placements = Vec::new();
+
+    // Device-level parameters: absolute offsets (no BaseOffset).
     for param in device_parameters(static_) {
-        let Some(mem) = &param.memory else {
-            continue;
-        };
-        let offset: usize = mem.offset.parse().unwrap_or(0);
-        let bit_offset: usize = mem.bit_offset.parse().unwrap_or(0);
-        let value = values
-            .get(&param.id)
-            .cloned()
-            .unwrap_or_else(|| param.value.clone());
+        write_parameter(param, 0, values, &types, &mut segments, &mut placements);
+    }
 
-        let type_ = types.get(param.parameter_type.as_str()).copied();
-        let encoded = encode(type_, &value)?;
-
-        let Some(segment) = segments.iter_mut().find(|s| s.id == mem.code_segment) else {
-            continue;
-        };
-
-        match encoded {
-            Encoded::Bits(v, bit_len) => {
-                write_bits(&mut segment.data, v, offset * 8 + bit_offset, bit_len);
-                placements.push(Placement {
-                    segment_id: mem.code_segment.clone(),
-                    param_id: param.id.clone(),
-                    offset,
-                    bit_offset,
-                    bit_len,
-                    value,
-                });
-            }
-            Encoded::Bytes(bytes) => {
-                for (i, b) in bytes.iter().enumerate() {
-                    write_bits(&mut segment.data, *b as u64, offset * 8 + bit_offset + i * 8, 8);
-                }
-                placements.push(Placement {
-                    segment_id: mem.code_segment.clone(),
-                    param_id: param.id.clone(),
-                    offset,
-                    bit_offset,
-                    bit_len: bytes.len() * 8,
-                    value,
-                });
-            }
+    // Module parameters: offset relative to the module instance's base.
+    let modules: HashMap<&str, &ModuleDef> = ap
+        .module_defs
+        .as_ref()
+        .map(|m| m.items.iter().map(|m| (m.id.as_str(), m)).collect())
+        .unwrap_or_default();
+    if let Some(dynamic) = &ap.dynamic {
+        let mut instances = Vec::new();
+        collect_module_instances(&dynamic.nodes, &modules, &mut instances);
+        for located in instances {
+            write_module_parameters(
+                located.instance,
+                located.module,
+                &located.prefix,
+                values,
+                &types,
+                &mut segments,
+                &mut placements,
+            );
         }
     }
 
@@ -204,6 +189,239 @@ fn device_parameters(static_: &Static) -> Vec<&Parameter> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+/// Write one parameter's value into its memory segment.
+///
+/// `base` is the absolute byte offset of the containing region (0 for
+/// device-level parameters; the module instance's base offset for module
+/// parameters). The final absolute offset is `base + Memory.Offset`.
+#[allow(clippy::too_many_arguments)]
+fn write_parameter(
+    param: &Parameter,
+    base: usize,
+    values: &HashMap<String, String>,
+    types: &HashMap<&str, &ParameterType>,
+    segments: &mut [SegmentImage],
+    placements: &mut Vec<Placement>,
+) {
+    let Some(mem) = &param.memory else {
+        return;
+    };
+    let rel_offset: usize = mem.offset.parse().unwrap_or(0);
+    let bit_offset: usize = mem.bit_offset.parse().unwrap_or(0);
+    let offset = base + rel_offset;
+    let value = values
+        .get(&param.id)
+        .cloned()
+        .unwrap_or_else(|| param.value.clone());
+
+    let type_ = types.get(param.parameter_type.as_str()).copied();
+    let Ok(encoded) = encode(type_, &value) else {
+        return;
+    };
+
+    let Some(segment) = segments.iter_mut().find(|s| s.id == mem.code_segment) else {
+        return;
+    };
+
+    match encoded {
+        Encoded::Bits(v, bit_len) => {
+            write_bits(&mut segment.data, v, offset * 8 + bit_offset, bit_len);
+            placements.push(Placement {
+                segment_id: mem.code_segment.clone(),
+                param_id: param.id.clone(),
+                offset,
+                bit_offset,
+                bit_len,
+                value,
+            });
+        }
+        Encoded::Bytes(bytes) => {
+            for (i, b) in bytes.iter().enumerate() {
+                write_bits(&mut segment.data, *b as u64, offset * 8 + bit_offset + i * 8, 8);
+            }
+            placements.push(Placement {
+                segment_id: mem.code_segment.clone(),
+                param_id: param.id.clone(),
+                offset,
+                bit_offset,
+                bit_len: bytes.len() * 8,
+                value,
+            });
+        }
+    }
+}
+
+/// A located module instance, ready for parameter overlay.
+struct LocatedModule<'a> {
+    instance: &'a ModuleInstance,
+    module: &'a ModuleDef,
+    /// `module_instance_id/` prefix used to key per-instance values.
+    prefix: String,
+}
+
+/// Recursively collect every `Module` instance in a `Dynamic` tree, following
+/// `ChannelIndependentBlock`/`Channel`/`ParameterBlock` and the *visible*
+/// branch of each `choose`/`when` (same rules as the form engine: exact
+/// `test` match first, then the `default="true"` branch).
+fn collect_module_instances<'a>(
+    nodes: &'a [UiNode],
+    modules: &HashMap<&str, &'a ModuleDef>,
+    out: &mut Vec<LocatedModule<'a>>,
+) {
+    for node in nodes {
+        match node {
+            UiNode::Module(instance) => {
+                if let Some(module) = modules.get(instance.ref_id.as_str()) {
+                    out.push(LocatedModule {
+                        instance,
+                        module,
+                        prefix: instance.id.clone(),
+                    });
+                }
+            }
+            UiNode::Choose(choose) => {
+                // Memory allocation is static: every module instance occupies
+                // its own pre-allocated region (its `BaseOffset` argument), so
+                // *all* `when` branches are materialized regardless of UI
+                // visibility.
+                for when in &choose.whens {
+                    collect_module_instances(&when.nodes, modules, out);
+                }
+            }
+            _ => {
+                if let Some(children) = node.children() {
+                    collect_module_instances(children, modules, out);
+                }
+            }
+        }
+    }
+}
+
+/// Write every memory-backed parameter of a module instance, applying the
+/// instance's argument value as the base offset.
+fn write_module_parameters(
+    instance: &ModuleInstance,
+    module: &ModuleDef,
+    prefix: &str,
+    values: &HashMap<String, String>,
+    types: &HashMap<&str, &ParameterType>,
+    segments: &mut [SegmentImage],
+    placements: &mut Vec<Placement>,
+) {
+    let Some(static_) = &module.static_ else {
+        return;
+    };
+    let Some(parameters) = &static_.parameters else {
+        return;
+    };
+
+    for node in &parameters.nodes {
+        match node {
+            ParamNode::Parameter(param) => {
+                if let Some(mem) = &param.memory {
+                    if mem.base_offset.is_empty() {
+                        continue;
+                    }
+                    let Some(base) = instance.arg_value(&mem.base_offset).and_then(|v| v.parse::<usize>().ok())
+                    else {
+                        continue;
+                    };
+                    let key = format!("{prefix}/{}", param.id);
+                    write_parameter_scoped(param, &key, base, values, types, segments, placements);
+                }
+            }
+            ParamNode::Union(union) => {
+                let mem = union.memory.as_ref();
+                let base = mem
+                    .filter(|m| !m.base_offset.is_empty())
+                    .and_then(|m| instance.arg_value(&m.base_offset))
+                    .and_then(|v| v.parse::<usize>().ok());
+                let Some(base) = base else {
+                    continue;
+                };
+                for param in &union.parameters {
+                    // Union children may carry their own Memory, or inherit
+                    // the union's; in the observed knxprod they inherit via
+                    // the union-level Memory + per-param Offset/BitOffset.
+                    let mut p = param.clone();
+                    if p.memory.is_none() {
+                        p.memory = mem.cloned();
+                    }
+                    let key = format!("{prefix}/{}", param.id);
+                    write_parameter_scoped(&p, &key, base, values, types, segments, placements);
+                }
+            }
+        }
+    }
+}
+
+/// Like [`write_parameter`] but looks the value up under a scoped key
+/// (`module_instance_id/param_id`) first, then the bare param id.
+#[allow(clippy::too_many_arguments)]
+fn write_parameter_scoped(
+    param: &Parameter,
+    key: &str,
+    base: usize,
+    values: &HashMap<String, String>,
+    types: &HashMap<&str, &ParameterType>,
+    segments: &mut [SegmentImage],
+    placements: &mut Vec<Placement>,
+) {
+    let Some(mem) = &param.memory else {
+        return;
+    };
+    let rel_offset: usize = mem.offset.parse().unwrap_or(0);
+    let bit_offset: usize = mem.bit_offset.parse().unwrap_or(0);
+    let offset = base + rel_offset;
+    let value = values
+        .get(key)
+        .cloned()
+        .or_else(|| values.get(&param.id).cloned())
+        .unwrap_or_else(|| param.value.clone());
+
+    let type_ = types.get(param.parameter_type.as_str()).copied();
+    let Ok(encoded) = encode(type_, &value) else {
+        return;
+    };
+
+    let Some(segment) = segments.iter_mut().find(|s| s.id == mem.code_segment) else {
+        return;
+    };
+
+    let param_id = if key.is_empty() {
+        param.id.clone()
+    } else {
+        key.to_string()
+    };
+
+    match encoded {
+        Encoded::Bits(v, bit_len) => {
+            write_bits(&mut segment.data, v, offset * 8 + bit_offset, bit_len);
+            placements.push(Placement {
+                segment_id: mem.code_segment.clone(),
+                param_id: param_id.clone(),
+                offset,
+                bit_offset,
+                bit_len,
+                value,
+            });
+        }
+        Encoded::Bytes(bytes) => {
+            for (i, b) in bytes.iter().enumerate() {
+                write_bits(&mut segment.data, *b as u64, offset * 8 + bit_offset + i * 8, 8);
+            }
+            placements.push(Placement {
+                segment_id: mem.code_segment.clone(),
+                param_id: param_id.clone(),
+                offset,
+                bit_offset,
+                bit_len: bytes.len() * 8,
+                value,
+            });
+        }
+    }
 }
 
 enum Encoded {
@@ -315,5 +533,93 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(s.decoded_data(), vec![1, 2, 3, 0]);
+    }
+
+    #[test]
+    fn module_base_offset_applies_argument_value() {
+        use crate::{Argument, Arguments, Dynamic, Memory, ModuleDefs, Parameters, Segment, Static, TextArg};
+
+        // One 8-bit parameter type `PT-1`.
+        let pt = ParameterType {
+            id: "PT-1".into(),
+            number: Some(crate::TypeNumber {
+                size_in_bit: "8".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Module def with an argument that supplies the base offset, and a
+        // parameter placed at `Offset=432` relative to it.
+        let module = crate::ModuleDef {
+            id: "MD-1".into(),
+            name: "M".into(),
+            arguments: Some(Arguments {
+                items: vec![Argument {
+                    id: "MD-1_A-1".into(),
+                    name: "ParamOffs".into(),
+                    allocates: "54".into(),
+                    ..Default::default()
+                }],
+            }),
+            static_: Some(Static {
+                parameters: Some(Parameters {
+                    nodes: vec![ParamNode::Parameter(Parameter {
+                        id: "MD-1_P-1".into(),
+                        parameter_type: "PT-1".into(),
+                        value: "42".into(),
+                        memory: Some(Memory {
+                            code_segment: "AS".into(),
+                            offset: "432".into(),
+                            base_offset: "MD-1_A-1".into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        // Instance supplies base 16.
+        let instance = crate::ModuleInstance {
+            id: "MD-1_M-1".into(),
+            ref_id: "MD-1".into(),
+            args: vec![crate::Arg::Text(TextArg {
+                ref_id: "MD-1_A-1".into(),
+                value: "16".into(),
+            })],
+            ..Default::default()
+        };
+
+        let ap = ApplicationProgram {
+            static_: Some(Static {
+                parameter_types: Some(crate::ParameterTypes { items: vec![pt] }),
+                code: Some(crate::Code {
+                    absolute: vec![Segment {
+                        id: "AS".into(),
+                        size: "600".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            dynamic: Some(Dynamic {
+                nodes: vec![UiNode::Module(instance)],
+            }),
+            module_defs: Some(ModuleDefs { items: vec![module] }),
+            ..Default::default()
+        };
+
+        let image = build_parameter_image(&ap, &HashMap::new()).unwrap();
+        let seg = image.segments.iter().find(|s| s.id == "AS").unwrap();
+        // Value 42 (= 0x2a) written at byte 432 + 16 = 448.
+        assert_eq!(seg.data[448], 0x2a);
+
+        let p = &image.placements[0];
+        assert_eq!(p.offset, 448);
+        assert_eq!(p.param_id, "MD-1_M-1/MD-1_P-1");
     }
 }

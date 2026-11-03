@@ -175,3 +175,44 @@ pub enum UiNode {
     #[serde(other)]
     Other,
 }
+
+impl ModuleInstance {
+    /// Look up one argument value by its argument-definition id, from either
+    /// a `TextArg` or a `NumericArg`.
+    pub fn arg_value(&self, arg_id: &str) -> Option<&str> {
+        self.args
+            .iter()
+            .find_map(|a| match a {
+                Arg::Text(t) if t.ref_id == arg_id => Some(t.value.as_str()),
+                Arg::Numeric(n) if n.ref_id == arg_id => Some(n.value.as_str()),
+                _ => None,
+            })
+    }
+}
+
+impl UiNode {
+    /// Direct child `UiNode`s of this node, if it is a container.
+    pub fn children(&self) -> Option<&[UiNode]> {
+        match self {
+            UiNode::ChannelIndependentBlock(b) => Some(&b.nodes),
+            UiNode::Channel(c) => Some(&c.nodes),
+            UiNode::ParameterBlock(p) => Some(&p.nodes),
+            _ => None,
+        }
+    }
+
+    pub fn as_choose(&self) -> Option<&Choose> {
+        match self {
+            UiNode::Choose(c) => Some(c),
+            _ => None,
+        }
+    }
+
+    pub fn as_module(&self) -> Option<&ModuleInstance> {
+        match self {
+            UiNode::Module(m) => Some(m),
+            _ => None,
+        }
+    }
+}
+

@@ -114,19 +114,50 @@ Not yet parsed (download builder, M2/M5):
 
 - `LoadProcedures` contents (load-sequence ops).
 - `Assign` value computation (M2).
-- Full module memory-offset instantiation via `Memory/@BaseOffset` (M5).
-- Building the group-object / address / association table **entries** (the
-  table headers are parsed; entries are empty in knxprod and written at
-  download time).
+- The exact `ComObjectTable` *memory* byte format — the knxprod segment
+  (e.g. `AS-4400` on the Time Switch) packs descriptors with the DPT, not the
+  plain 2-octet runtime GO descriptor (see below).
 
 ### M5 memory image (in progress)
 
 `knx-prod` now parses the `<Code>` segments (`AbsoluteSegment` and
 `RelativeSegment`, with base64 `<Data>` decoded to bytes), `Memory/@BaseOffset`,
-and the `AddressTable`/`AssociationTable` headers (`CodeSegment`, `Offset`,
-`MaxEntries`). `knx_prod::build_parameter_image` overlays device-level
-parameter values onto the segment templates (MSB-first within a byte,
-big-endian across bytes — assumption to confirm against ETS5).
+the `Argument/@Allocates` stride, and the `AddressTable`/`AssociationTable`
+headers (`CodeSegment`, `Offset`, `MaxEntries`).
+`knx_prod::build_parameter_image` overlays device-level parameter values onto
+the segment templates (MSB-first within a byte, big-endian across bytes —
+assumption to confirm against ETS5), and instantiates module parameters:
+
+- A `ModuleDef` declares `Argument`s; its parameters (and `Union`s) carry
+  `Memory/@BaseOffset` naming one such argument (e.g. `ParamOffsFunction`).
+- Each `Module` instance in `Dynamic` passes the argument's numeric value via
+  `NumericArg`/`TextArg` (matched by `RefId` = the `Argument/@Id`).
+- The absolute byte offset is `argument value + Memory/@Offset` (verified on
+  MDT's Time Switch: instance stride = `Argument/@Allocates`).
+- All `Module` instances are materialized regardless of `choose`/`when` UI
+  visibility, because each instance occupies a statically allocated region.
+
+### M5 table builders (`knx-prod::tables`)
+
+The three System B tables are built per `03_05_01 §4.16/4.17/4.18`:
+
+- **Group Address Table** (Realisation Type 7): 2-octet BE length + sorted
+  16-bit group addresses (TSAP = 1-based index).
+- **Association Table** (Realisation Type 6, format 0): 2-octet BE length +
+  2-octet entries `TSAP` (high) `ASAP` (low), both 1-based; ASAP = group
+  object number, TSAP = index into the Group Address Table.
+- **Group Object Table** (Realisation Type 7): 2-octet BE length + 2-octet
+  descriptors (flags in the high octet, `ObjectSize` → value-field-type in the
+  low octet).
+
+`knxcfg tables` dumps the GO table and ASAP numbering. Two things still need
+ETS5-oracle confirmation: the module GO ASAP *numbering universe*
+(`BaseNumber + Number` across module instances vs device-level `Number`), and
+the `ComObjectTable` memory format — the shipped segment (e.g. 880 bytes for
+the Time Switch = 440 descriptors) is **not** the 2-octet runtime descriptor;
+it packs the DPT (`DatapointType`) into each entry, so the 6-octet System-300
+style (`§4.18.5.2.4`: 2-octet config + 4-octet DPT) is the likely layout to
+reverse-engineer.
 
 `knxcfg memory <knxprod> <h2p>` prints the segment map, the parameter
 placements, a hex dump of the parameter segments, and a template self-check.

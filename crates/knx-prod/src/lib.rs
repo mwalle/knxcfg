@@ -17,6 +17,7 @@ mod catalog;
 mod dynamic;
 mod hardware;
 pub mod memory;
+pub mod tables;
 
 use anyhow::{anyhow, Context, Result};
 use std::io::Read;

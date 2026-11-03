@@ -46,6 +46,12 @@ enum Cmd {
         /// Hardware2ProgramRefId
         h2p: String,
     },
+    /// Build the group address / association / group object tables (M5)
+    Tables {
+        file: PathBuf,
+        /// Hardware2ProgramRefId
+        h2p: String,
+    },
     /// Add a device from a knxprod to the topology
     Add {
         knxprod: PathBuf,
@@ -113,6 +119,7 @@ fn main() -> Result<()> {
         Cmd::Probe { file, h2p } => cmd_probe(&file, &h2p),
         Cmd::Form { file, h2p } => cmd_form(&file, &h2p),
         Cmd::Memory { file, h2p } => cmd_memory(&file, &h2p),
+        Cmd::Tables { file, h2p } => cmd_tables(&file, &h2p),
         Cmd::Add { knxprod, h2p, ia, name } => {
             let dir = resolve_project(project.as_deref())?;
             cmd_add(&dir, &knxprod, &h2p, &ia, name.as_deref())
@@ -476,6 +483,52 @@ fn all_com_objects(s: &knx_prod::Static) -> Vec<knx_prod::ComObject> {
         out.extend(c.items.iter().cloned());
     }
     out
+}
+
+/// Dump the group address / association / group object tables (M5).
+///
+/// Uses the knxprod group objects only (no project links), so the address and
+/// association tables are empty; the group object table shows the device's
+/// group objects as they would be encoded.
+fn cmd_tables(file: &PathBuf, h2p: &str) -> Result<()> {
+    let knxprod = knx_prod::KnxProd::open(file)
+        .with_context(|| format!("reading {}", file.display()))?;
+    let ap = knxprod
+        .application_program(h2p)
+        .with_context(|| format!("resolving {h2p}"))?;
+
+    let objects = knx_prod::tables::group_objects(&ap);
+    println!("{}: {} group object(s)", ap.name, objects.len());
+
+    let descriptors: Vec<knx_prod::tables::GroupObject> =
+        objects.iter().map(|(_, o)| o.clone()).collect();
+    let got = knx_prod::tables::build_group_object_table(&descriptors);
+
+    println!("\nGroup Object Table ({} bytes):", got.len());
+    for (i, chunk) in got.chunks(16).enumerate() {
+        let hex: Vec<String> = chunk.iter().map(|b| format!("{b:02x}")).collect();
+        println!("  {:04x}  {}", i * 16, hex.join(" "));
+    }
+
+    println!("\nASAP numbering (module instances expanded):");
+    for (asap, obj) in &objects {
+        println!(
+            "  #{:<4} flags={:02x} vft={}",
+            asap, go_flags_byte(obj.flags), obj.value_field_type
+        );
+    }
+    Ok(())
+}
+
+fn go_flags_byte(f: knx_prod::tables::GroupObjectFlags) -> u8 {
+    let mut b = 0u8;
+    if f.update { b |= 0x80; }
+    if f.transmit { b |= 0x40; }
+    if f.read_on_init { b |= 0x20; }
+    if f.write { b |= 0x10; }
+    if f.read { b |= 0x08; }
+    if f.communicate { b |= 0x04; }
+    b
 }
 
 fn cmd_add(dir: &Path, knxprod_path: &Path, h2p: &str, ia_str: &str, name: Option<&str>) -> Result<()> {

@@ -38,6 +38,9 @@ D13 record knxprod path per device at `add` time.
   M5: `<Code>` segments (absolute/relative, base64→bytes), `Memory/@BaseOffset`,
   `AddressTable`/`AssociationTable` headers, and `build_parameter_image` +
   `check_template` (device-level parameter overlay + template self-check).
+  Module `BaseOffset` instantiation done: module parameters are overlaid at
+  `argument base + Memory.Offset` for every `Module` instance (all `when`
+  branches, since memory allocation is static).
 - `knx-form` — form engine: `evaluate(ap, values, lang) -> Vec<FormPage>`
   (`FormPage { title, sections }`; `FormField { id, label, kind, value,
   enabled }`; `FieldKind::{Checkbox, Enum, Number, Text}`). Resolves
@@ -61,7 +64,8 @@ knxcfg link <ia> <object> <ga>                 unlink <ia> <object> <ga>
 knxcfg device-set <ia> <param-id> <value>
 knxcfg edit <ia> [--knxprod <file>]            # TUI: Tab=pages, Enter=edit, s=save, q=quit
 knxcfg catalog <knxprod> | probe <knxprod> <h2p> | form <knxprod> <h2p>
-knxcfg memory <knxprod> <h2p>                    # M5: segments, placements, template check
+knxcfg memory <knxprod> <h2p>                      # M5: segments, placements, template check
+knxcfg tables <knxprod> <h2p>                      # M5: group-object table (ASAP + flags + vft)
 ```
 `add` auto-creates Area/Line from the IA and records the canonical knxprod
 path in `DeviceRef.knxprod` (absolute — known portability tradeoff).
@@ -70,21 +74,26 @@ path in `DeviceRef.knxprod` (absolute — known portability tradeoff).
 Done: M0 skeleton · M1 knxprod parser · M1.5 form engine · M1.6 project
 editing + TUI (incl. translations, access filtering, pages).
 In progress: **M5** memory-image builder — code segments + device-parameter
-overlay + template self-check done (`knxcfg memory`); remaining: module
-`BaseOffset` instantiation, GO/address/association table entries, download,
-read-back, byte-identity vs ETS.
+overlay + template self-check done (`knxcfg memory`); module `BaseOffset`
+instantiation done (`Argument/@Allocates` parsed, `knxcfg memory` overlays
+module params at `base + Offset`); table builders done and ETS5-oracle-checked
+(`knx-prod::tables`, `docs/ets5-findings.md`): Association Table
+(`[TSAP][ASAP]`, confirmed) and Group Object Table (4 octets/GO
+`[word0][flags][00][vft]`). Remaining: GO-descriptor `word0`/DPT octets,
+GrAT header width, segment overlay, download, read-back, byte-identity vs ETS.
 Next: **M2** `.knxproj` import (clean-room RE) · **M3** `.knxproj` export ·
 **M4** USB cEMI transport (`09_03 §3`) · rest of **M5** (download + read-back,
 byte-identical to ETS as oracle) · **M6** hardening.
 
 ## Known loose ends
-- GO linking uses `object_number` only; module GO identity needs the
-  association-table work (M5).
+- GO linking uses `object_number` only; the GO-descriptor `word0` octet (sparse
+  per-GO identifier, NOT the ASAP) and DPT-octet packing still need decode
+  (`docs/ets5-findings.md`).
 - knxprod path is stored absolute (machine-local); `--knxprod` override exists;
   vendoring into `vendor/` is a later option.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
-`cargo build --offline` · `cargo test --offline` (10 tests).
+`cargo build --offline` · `cargo test --offline` (19 tests).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),
 zip, base64, clap, anyhow, thiserror, ratatui 0.28, crossterm 0.27.

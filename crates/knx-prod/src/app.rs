@@ -212,6 +212,10 @@ pub struct Argument {
     pub name: String,
     #[serde(rename = "@Type", default)]
     pub arg_type: String,
+    /// Size in bytes that this argument allocates for the module instance
+    /// (the stride between consecutive instances' base offsets).
+    #[serde(rename = "@Allocates", default)]
+    pub allocates: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -423,6 +427,11 @@ pub struct ComObject {
     pub read_on_init_flag: String,
     #[serde(rename = "@DatapointType", default)]
     pub datapoint_type: String,
+    /// Module group objects only: names the argument (in the enclosing
+    /// `ModuleDef`) supplying the base group-object number; the object's
+    /// final ASAP is `BaseNumber value + Number`.
+    #[serde(rename = "@BaseNumber", default)]
+    pub base_number: String,
 }
 
 /// The `<Code>` element: a set of memory segments. Each segment is either an
