@@ -168,7 +168,7 @@ fn walk_pages(nodes: &[UiNode], ctx: &Ctx, scope: usize, chan_label: &str, out: 
                 walk_pages(&block.nodes, ctx, scope, chan_label, out);
             }
             UiNode::Channel(ch) => {
-                let title = translated(ch.id.as_str(), ch.text.as_str(), &ctx.translations);
+                let title = channel_title(ch, ctx, scope, chan_label);
                 let mut sections = Vec::new();
                 walk_sections(&ch.nodes, ctx, scope, chan_label, &mut sections);
                 out.push(FormPage { title, sections });
@@ -220,7 +220,7 @@ fn walk_sections(nodes: &[UiNode], ctx: &Ctx, scope: usize, chan_label: &str, ou
                 walk_sections(&block.nodes, ctx, scope, chan_label, out);
             }
             UiNode::Channel(ch) => {
-                push_title(out, translated(ch.id.as_str(), ch.text.as_str(), &ctx.translations));
+                push_title(out, channel_title(ch, ctx, scope, chan_label));
                 walk_sections(&ch.nodes, ctx, scope, chan_label, out);
             }
             UiNode::ParameterBlock(pb) => {
@@ -257,25 +257,47 @@ fn walk_sections(nodes: &[UiNode], ctx: &Ctx, scope: usize, chan_label: &str, ou
     }
 }
 
-/// A module definition's top-level `ParameterBlock` carries the module title
-/// (e.g. `Text="Logic {{ChNo}}: {{0}}"`); its children are the actual
-/// content, so unwrap it instead of rendering a redundant section header.
+/// A module definition's top-level `ParameterBlock` or `Channel` carries the
+/// module title (e.g. `Text="Logic {{ChNo}}: {{0}}"`); its children are the
+/// actual content, so unwrap it instead of rendering a redundant section
+/// header.
 fn module_content(dynamic: &knx_prod::Dynamic) -> &[UiNode] {
     if dynamic.nodes.len() == 1 {
-        if let UiNode::ParameterBlock(pb) = &dynamic.nodes[0] {
-            return &pb.nodes;
+        match &dynamic.nodes[0] {
+            UiNode::ParameterBlock(pb) => return &pb.nodes,
+            UiNode::Channel(ch) => return &ch.nodes,
+            _ => {}
         }
     }
     &dynamic.nodes
 }
 
 fn block_title(pb: &knx_prod::ParameterBlock, ctx: &Ctx, scope: usize, chan_label: &str) -> String {
-    let mut text = translated(pb.id.as_str(), pb.text.as_str(), &ctx.translations);
-    if !pb.text_parameter_ref_id.is_empty() {
-        let v = ctx.ev.ref_value(scope, &pb.text_parameter_ref_id).unwrap_or("");
-        text = text.replace("{{0}}", v);
+    let text = translated(pb.id.as_str(), pb.text.as_str(), &ctx.translations);
+    fill_template(text, &pb.text_parameter_ref_id, ctx, scope, chan_label)
+}
+
+fn channel_title(ch: &knx_prod::Channel, ctx: &Ctx, scope: usize, chan_label: &str) -> String {
+    let text = translated(ch.id.as_str(), ch.text.as_str(), &ctx.translations);
+    fill_template(text, &ch.text_parameter_ref_id, ctx, scope, chan_label)
+}
+
+/// Substitute the `{{0}}` (value of the `TextParameterRefId` parameter) and
+/// `{{ChNo}}` placeholders of a block/channel text.
+///
+/// "Channel {{ChNo}}: {{0}}" with an empty `{{0}}` → "Channel A", not
+/// "Channel A:".
+fn fill_template(text: String, text_ref: &str, ctx: &Ctx, scope: usize, chan_label: &str) -> String {
+    if !text.contains("{{") {
+        return text;
     }
-    text.replace("{{ChNo}}", chan_label)
+    let v = if text_ref.is_empty() {
+        ""
+    } else {
+        ctx.ev.ref_value(scope, text_ref).unwrap_or("")
+    };
+    let text = text.replace("{{0}}", v).replace("{{ChNo}}", chan_label);
+    text.trim_end().trim_end_matches(':').trim_end().to_string()
 }
 
 fn translated(id: &str, raw: &str, translations: &Translations) -> String {
@@ -296,8 +318,9 @@ fn push_title(out: &mut Vec<FormSection>, title: String) {
 ///
 /// ETS takes the instance's `Name` attribute when present. Instances without
 /// a `Name` (e.g. MDT's `Logic` modules) get their title from the module
-/// definition's top-level `ParameterBlock` `Text` template, with the
-/// `{{ChNo}}` and `{{0}}` placeholders substituted:
+/// definition's top-level `ParameterBlock` (or `Channel`, e.g. MDT's
+/// actuator channels) `Text` template, with the `{{ChNo}}` and `{{0}}`
+/// placeholders substituted:
 ///
 /// ```xml
 /// <ModuleDef Name="ModuleDefLogic">
@@ -317,24 +340,16 @@ fn module_title(instance: &knx_prod::ModuleInstance, module: &ModuleDef, ctx: &C
             instance.name.clone()
         }
     } else if let Some(dynamic) = &module.dynamic {
-        if let Some(pb) = dynamic.nodes.iter().find_map(|n| match n {
-            UiNode::ParameterBlock(pb) => Some(pb),
+        let chno = module_arg_value(instance, module, "ChNo");
+        let title = dynamic.nodes.iter().find_map(|n| match n {
+            UiNode::ParameterBlock(pb) => Some(block_title(pb, ctx, scope, &chno)),
+            UiNode::Channel(ch) => Some(channel_title(ch, ctx, scope, &chno)),
             _ => None,
-        }) {
-            let chno = module_arg_value(instance, module, "ChNo");
-            let mut text = translated(pb.id.as_str(), pb.text.as_str(), &ctx.translations);
-            if !pb.text_parameter_ref_id.is_empty() {
-                let v = ctx.ev.ref_value(scope, &pb.text_parameter_ref_id).unwrap_or("");
-                text = text.replace("{{0}}", v);
-            }
-            let title = text.replace("{{ChNo}}", &chno);
-            // "Logic {{ChNo}}: {{0}}" with an empty `{{0}}` → "Logic 1:".
-            let trimmed = title.trim_end().trim_end_matches(':').trim_end().to_string();
-            if !trimmed.is_empty() {
-                return trimmed;
-            }
+        });
+        match title {
+            Some(t) if !t.is_empty() => t,
+            _ => module.name.clone(),
         }
-        module.name.clone()
     } else {
         module.name.clone()
     }

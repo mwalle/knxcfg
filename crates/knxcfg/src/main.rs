@@ -1110,7 +1110,8 @@ fn cmd_edit(dir: &Path, ia_str: &str, knxprod_override: Option<&Path>) -> Result
     let device = open_device(dir, &project, ia, knxprod_override)?;
     let ap = &device.ap;
 
-    let saved = tui::edit_device(ap, &device.values())?;
+    let header = format!("{ia} · {}", device.device_ref.name);
+    let saved = tui::edit_device(ap, &device.values(), &header)?;
     let Some(new_values) = saved else {
         println!("No changes saved");
         return Ok(());

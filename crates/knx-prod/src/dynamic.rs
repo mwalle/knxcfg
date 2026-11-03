@@ -40,6 +40,8 @@ pub struct Channel {
     pub text: String,
     #[serde(rename = "@Number", default)]
     pub number: String,
+    #[serde(rename = "@TextParameterRefId", default)]
+    pub text_parameter_ref_id: String,
     #[serde(rename = "$value", default)]
     pub nodes: Vec<UiNode>,
 }
