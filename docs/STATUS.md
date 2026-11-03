@@ -82,7 +82,11 @@ D14 product store: project `vendor/` (default) + global
     connection-oriented TL client (`03_03_04 §5`, Style 1: T_ACK/T_NAK, 3 s
     ack timeout, 3 repetitions, re-ACK of repeated PDUs, T_NAK on a wrong
     sequence number, remote T_Disconnect), `device_descriptor_read`,
-    `memory_read` (12-octet chunks).
+    `memory_read` (12-octet chunks); broadcasts (`T_Data_Broadcast`) and
+    the network management procedures `NM_IndividualAddress_Read`,
+    `NM_IndividualAddress_Write` (`03_05_02 §2.3`: occupancy check, wait for
+    exactly one device in programming mode, write, verify with DD0,
+    `A_Restart`), `NM_IndividualAddress_SerialNumber_Read/Write` (§2.4/§2.5).
 - `knxcfg` — CLI (`main.rs`, `product_store.rs`, `download.rs` plan → cEMI
   frames) + TUI (`tui.rs`; typed values are validated before they are taken).
 
@@ -102,6 +106,7 @@ knxcfg download <ia> [--knxprod F] [--partial] [--frames]   # dry run: image, ta
 knxcfg interfaces                              # hidraw devices, KNX USB interfaces marked
 knxcfg device-info <ia> [-i /dev/hidrawN]      # mask version (DD0) over the bus
 knxcfg mem-read <ia> <addr> <count> [-i ...]   # hex dump; addr 0x4000 / 4000h / decimal
+knxcfg prog-ia <ia> [--serial SN] [--wait S] [-i ...]  # assign IA: programming mode, or by serial (0083:12345678)
 ```
 Bus commands use `--interface` or the only KNX `hidraw` device. `/dev/hidraw*`
 is root-only by default; a udev rule (`SUBSYSTEM=="hidraw",
@@ -132,7 +137,7 @@ handshake and `PID_COMM_MODE` write confirmed; no `L_Data.con` for any
 traffic while listening, and `knx-usb-cli mem 1.1.1` got no reply either —
 the TP1 side of the interface (or the absence of a device at 1.1.1) is the
 open question, not the USB framing. Still to do: a working hardware run,
-`A_PropertyValue_Read/Write` responses, `NM_IndividualAddress_Read/Write`,
+`A_PropertyValue_Read/Write` responses,
 executing a download plan (incl. `LdCtrlWriteRelMem`).
 Next: finish **M4** with a hardware run, then live download/read-back ·
 **M2** `.knxproj` import (also the way to get ETS parameter images to compare
@@ -142,7 +147,7 @@ against) · **M3** `.knxproj` export · **M6** hardening.
 - Not supported (reported, not silent): KNX Data Secure (download only works
   with security off), `Allocator`-based module arguments, `<Property>`
   parameters other than the device hardware checks, calculations outside
-  the JS subset (KLIC's Steinhart-Hart tables), coupler/IA programming.
+  the JS subset (KLIC's Steinhart-Hart tables), coupler programming.
 - Unverified against ETS: System B table bytes, the partial download, the
   communication flag of unlinked System B objects, rounding of calculation
   results into integer parameters, the content of table segments behind the
@@ -150,7 +155,7 @@ against) · **M3** `.knxproj` export · **M6** hardening.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
-`cargo build --offline` · `cargo test --offline` (79 tests, incl. the ETS5
+`cargo build --offline` · `cargo test --offline` (87 tests, incl. the ETS5
 oracle regression test that reads `refs/knxprod`).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),
 zip, base64, clap, anyhow, thiserror, ratatui 0.28, crossterm 0.27.

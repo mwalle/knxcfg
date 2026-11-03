@@ -21,10 +21,15 @@
 //! | `A_Memory_Read`             | `1000nnnnnn`   |
 //! | `A_Memory_Write`            | `1010nnnnnn`   |
 //! | `A_IndividualAddress_Write` | `0011000000`   |
+//! | `A_IndividualAddress_Read`  | `0100000000`   |
+//! | `A_IndividualAddress_Response` | `0101000000` |
 //! | `A_DeviceDescriptor_Read`   | `1100dddddd`   |
 //! | `A_Restart`                 | `1110000000`   |
 //! | `A_PropertyValue_Read`      | `1111010101`   |
 //! | `A_PropertyValue_Write`     | `1111010111`   |
+//! | `A_IndividualAddressSerialNumber_Read`     | `1111011100` |
+//! | `A_IndividualAddressSerialNumber_Response` | `1111011101` |
+//! | `A_IndividualAddressSerialNumber_Write`    | `1111011110` |
 //!
 //! On the wire the APCI shares its first octet with the Transport Layer
 //! control field: octet 6 of the frame is `TPCI (6 bits) | APCI bits 9..8`,
@@ -44,6 +49,11 @@ pub mod apci {
     pub const MEMORY_RESPONSE: u16 = 0x240;
     pub const MEMORY_WRITE: u16 = 0x280;
     pub const INDIVIDUAL_ADDRESS_WRITE: u16 = 0x0C0;
+    pub const INDIVIDUAL_ADDRESS_READ: u16 = 0x100;
+    pub const INDIVIDUAL_ADDRESS_RESPONSE: u16 = 0x140;
+    pub const SERIAL_NUMBER_READ: u16 = 0x3DC;
+    pub const SERIAL_NUMBER_RESPONSE: u16 = 0x3DD;
+    pub const SERIAL_NUMBER_WRITE: u16 = 0x3DE;
     pub const DEVICE_DESCRIPTOR_READ: u16 = 0x300;
     pub const DEVICE_DESCRIPTOR_RESPONSE: u16 = 0x340;
     pub const RESTART: u16 = 0x380;
@@ -127,6 +137,44 @@ pub fn individual_address_write(new_address: u16) -> Vec<u8> {
     let mut out = apci_octets(apci::INDIVIDUAL_ADDRESS_WRITE, 0).to_vec();
     out.extend_from_slice(&new_address.to_be_bytes());
     out
+}
+
+/// `A_IndividualAddress_Read` (`03_03_07 §3.2.3`), broadcast; answered by
+/// the devices in programming mode.
+pub fn individual_address_read() -> Vec<u8> {
+    apci_octets(apci::INDIVIDUAL_ADDRESS_READ, 0).to_vec()
+}
+
+/// `A_IndividualAddressSerialNumber_Read` (`03_03_07 §3.2.4`), broadcast:
+/// `[APCI:2][serial number:6]`.
+pub fn serial_number_read(serial: &[u8; 6]) -> Vec<u8> {
+    let mut out = apci_octets(apci::SERIAL_NUMBER_READ, 0).to_vec();
+    out.extend_from_slice(serial);
+    out
+}
+
+/// `A_IndividualAddressSerialNumber_Write` (`03_03_07 §3.2.5`), broadcast:
+/// `[APCI:2][serial number:6][new address:2][reserved:4]`.
+pub fn serial_number_write(serial: &[u8; 6], new_address: u16) -> Vec<u8> {
+    let mut out = apci_octets(apci::SERIAL_NUMBER_WRITE, 0).to_vec();
+    out.extend_from_slice(serial);
+    out.extend_from_slice(&new_address.to_be_bytes());
+    out.extend_from_slice(&[0; 4]);
+    out
+}
+
+/// The full 10-bit APCI of an APDU.
+pub fn apci_of(apdu: &[u8]) -> Option<u16> {
+    (apdu.len() >= 2).then(|| ((apdu[0] as u16 & 0x03) << 8) | apdu[1] as u16)
+}
+
+/// `A_IndividualAddressSerialNumber_Response` (`03_03_07 §3.2.4`):
+/// `[APCI:2][serial number:6][domain address:2][reserved:2]` → serial number.
+pub fn parse_serial_number_response(apdu: &[u8]) -> Result<[u8; 6]> {
+    if apci_of(apdu) != Some(apci::SERIAL_NUMBER_RESPONSE) || apdu.len() < 8 {
+        bail!("not an A_IndividualAddressSerialNumber_Response: {apdu:02X?}");
+    }
+    Ok(apdu[2..8].try_into().expect("6 octets"))
 }
 
 /// Does `apdu` carry the service with the 4-bit APCI `apci` (the services
@@ -215,5 +263,20 @@ mod tests {
     #[test]
     fn individual_address_write_layout() {
         assert_eq!(individual_address_write(0x1101), vec![0x00, 0xC0, 0x11, 0x01]);
+        assert_eq!(individual_address_read(), vec![0x01, 0x00]);
+        assert_eq!(apci_of(&[0x01, 0x40]), Some(apci::INDIVIDUAL_ADDRESS_RESPONSE));
+    }
+
+    #[test]
+    fn serial_number_layouts() {
+        let sn = [0x00, 0x83, 0x12, 0x34, 0x56, 0x78];
+        assert_eq!(serial_number_read(&sn), vec![0x03, 0xDC, 0x00, 0x83, 0x12, 0x34, 0x56, 0x78]);
+        assert_eq!(
+            serial_number_write(&sn, 0x1107),
+            vec![0x03, 0xDE, 0x00, 0x83, 0x12, 0x34, 0x56, 0x78, 0x11, 0x07, 0, 0, 0, 0]
+        );
+        let resp = [0x03, 0xDD, 0x00, 0x83, 0x12, 0x34, 0x56, 0x78, 0x00, 0x00, 0x00, 0x00];
+        assert_eq!(parse_serial_number_response(&resp).unwrap(), sn);
+        assert!(parse_serial_number_response(&resp[..6]).is_err());
     }
 }

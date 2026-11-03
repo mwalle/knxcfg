@@ -107,6 +107,14 @@ pub fn l_data_req(tpci: u8, src: u16, dst: u16, apdu: &[u8]) -> CemiFrame {
     }
 }
 
+/// `L_Data.req` broadcast (`T_Data_Broadcast`, destination 0/0/0 with
+/// address type group, `03_03_04 §2`) carrying `apdu`.
+pub fn l_data_broadcast(src: u16, apdu: &[u8]) -> CemiFrame {
+    let mut f = l_data_req(tpci::T_DATA_GROUP, src, 0x0000, apdu);
+    f.body[1] |= 0x80; // Ctrl2 AT = group
+    f
+}
+
 /// `T_Connect` / `T_Disconnect` control frame (no APDU).
 pub fn l_data_control(tpci: u8, src: u16, dst: u16) -> CemiFrame {
     l_data_req(tpci, src, dst, &[])

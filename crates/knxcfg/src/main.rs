@@ -165,6 +165,21 @@ enum Cmd {
         #[arg(short, long)]
         interface: Option<PathBuf>,
     },
+    /// Assign an individual address over the bus: to the device in
+    /// programming mode, or with --serial to the device with that serial number
+    ProgIa {
+        /// New individual address, e.g. 1.1.5
+        ia: String,
+        /// KNX serial number of the device, e.g. 0083:12345678
+        #[arg(long)]
+        serial: Option<String>,
+        /// Seconds to wait for a device in programming mode
+        #[arg(long, default_value_t = 60)]
+        wait: u64,
+        /// USB interface (defaults to the only KNX one)
+        #[arg(short, long)]
+        interface: Option<PathBuf>,
+    },
     /// Read device memory over the bus
     MemRead {
         /// Individual address, e.g. 1.1.1
@@ -274,6 +289,12 @@ fn main() -> Result<()> {
         }
         Cmd::Interfaces => bus::cmd_interfaces(),
         Cmd::DeviceInfo { ia, interface } => bus::cmd_device_info(interface.as_deref(), &ia),
+        Cmd::ProgIa { ia, serial, wait, interface } => bus::cmd_prog_ia(
+            interface.as_deref(),
+            &ia,
+            serial.as_deref(),
+            std::time::Duration::from_secs(wait),
+        ),
         Cmd::MemRead { ia, address, count, interface } => {
             bus::cmd_mem_read(interface.as_deref(), &ia, &address, count)
         }
