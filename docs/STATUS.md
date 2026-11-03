@@ -66,7 +66,7 @@ knxcfg edit <ia> [--knxprod <file>]            # TUI: Tab=pages, Enter=edit, s=s
 knxcfg catalog <knxprod> | probe <knxprod> <h2p> | form <knxprod> <h2p>
 knxcfg memory <knxprod> <h2p>                      # M5: segments, placements, template check
 knxcfg tables <knxprod> <h2p>                      # M5: group-object table (ASAP + flags + vft)
-knxcfg download <ia> [--knxprod <file>]            # M5 dry run: full image + download plan
+knxcfg download <ia> [--knxprod <file>]            # M5 dry run: full image + plan + read-back self-check
 ```
 `add` auto-creates Area/Line from the IA and records the canonical knxprod
 path in `DeviceRef.knxprod` (absolute — known portability tradeoff).
@@ -89,11 +89,17 @@ ETS5-oracle-checked against a real download (`docs/ets5-findings.md`, ETS's
 Done since: full device image assembly (`knx_prod::build_device_image`) —
 parameter image + GrAT/GrOAT/GoT overlaid at their knxprod header offsets —
 and the active-mode GO filter (`tables::active_group_objects`, choose/when
-visibility + parameter values). `knxcfg download <ia>` is a dry run that
-prints the assembled segments and the `A_Memory_Write`/load-control plan.
-Remaining: real `A_Memory_Write` + `A_PropertyValue_Write` PropertyId 5
-(LoadStateControl 01/03/02/04) over the transport, read-back, byte-identity
-vs ETS (oracle).
+visibility + parameter values). The inverse read-back path is also in place:
+`memory::decode_parameter_image`, `tables::read_links`, and
+`read_back_device`. The knxprod `<LoadProcedures>` element is parsed and
+`download_plan` now emits the device's exact load sequence (`LdCtrlConnect`,
+`LdCtrlUnload/Load/AbsSegment/TaskSegment/LoadCompleted`, `LdCtrlRestart`,
+`LdCtrlDisconnect`) with the assembled segment bytes attached.
+`knxcfg download <ia>` is a dry run that prints the assembled segments, the
+load-procedure plan, and a read-back self-check against the project values.
+Remaining: encoding the plan steps as real `A_Memory_Write`/
+`A_PropertyValue_Write` cEMI messages over the transport, device read-back,
+and byte-identity vs ETS (oracle).
 Next: **M2** `.knxproj` import (clean-room RE) · **M3** `.knxproj` export ·
 **M4** USB cEMI transport (`09_03 §3`) · rest of **M5** (download + read-back,
 byte-identical to ETS as oracle) · **M6** hardening.
@@ -108,6 +114,6 @@ byte-identical to ETS as oracle) · **M6** hardening.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
-`cargo build --offline` · `cargo test --offline` (25 tests).
+`cargo build --offline` · `cargo test --offline` (29 tests).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),
 zip, base64, clap, anyhow, thiserror, ratatui 0.28, crossterm 0.27.

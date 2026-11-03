@@ -662,32 +662,80 @@ fn cmd_download(dir: &Path, ia_str: &str, knxprod_override: Option<&Path>) -> Re
         }
     }
 
-    println!("\nDownload plan (dry run — cEMI transport lands in M4):");
-    for seg in &image.segments {
-        let meta = ap
-            .static_
-            .as_ref()
-            .and_then(|s| s.code.as_ref())
-            .and_then(|c| c.by_id(&seg.id));
-        if seg.address.is_empty() {
-            let lsm = meta.map(|s| s.load_state_machine.as_str()).unwrap_or("");
-            let rel = meta.map(|s| s.offset.as_str()).unwrap_or("");
-            println!(
-                "  A_Memory_Write        segment {:<12} LoadStateMachine={:<10} Offset={:<6} len={}",
-                seg.id, lsm, rel, seg.size
-            );
-        } else {
-            let addr = seg.address.parse::<u32>().unwrap_or(0);
-            println!(
-                "  A_Memory_Write        address 0x{addr:04x}  len={}",
-                seg.size
-            );
+    let plan = knx_prod::download_plan(&ap, &image)?;
+    println!(
+        "\nDownload plan ({} step(s), dry run — cEMI transport lands in M4):",
+        plan.len()
+    );
+    for step in &plan {
+        match step {
+            knx_prod::DownloadStep::Connect => println!("  LdCtrlConnect"),
+            knx_prod::DownloadStep::Disconnect => println!("  LdCtrlDisconnect"),
+            knx_prod::DownloadStep::Restart => println!("  LdCtrlRestart"),
+            knx_prod::DownloadStep::CompareProp {
+                obj_idx,
+                prop_id,
+                inline_data,
+            } => {
+                let hex: Vec<String> =
+                    inline_data.iter().map(|b| format!("{b:02x}")).collect();
+                println!(
+                    "  LdCtrlCompareProp ObjIdx={obj_idx} PropId={prop_id} InlineData={}",
+                    hex.join("")
+                );
+            }
+            knx_prod::DownloadStep::Unload { lsm_idx } => {
+                println!("  LdCtrlUnload LsmIdx={lsm_idx}")
+            }
+            knx_prod::DownloadStep::Load { lsm_idx } => {
+                println!("  LdCtrlLoad LsmIdx={lsm_idx}")
+            }
+            knx_prod::DownloadStep::AbsSegment {
+                lsm_idx,
+                seg_type,
+                address,
+                size,
+                access,
+                mem_type,
+                seg_flags,
+                data: _,
+            } => println!(
+                "  LdCtrlAbsSegment LsmIdx={lsm_idx} SegType={seg_type} Address=0x{address:04x} Size={size} Access={access} MemType={mem_type} SegFlags={seg_flags}"
+            ),
+            knx_prod::DownloadStep::TaskSegment { lsm_idx, address } => {
+                println!("  LdCtrlTaskSegment LsmIdx={lsm_idx} Address=0x{address:04x}")
+            }
+            knx_prod::DownloadStep::LoadCompleted { lsm_idx } => {
+                println!("  LdCtrlLoadCompleted LsmIdx={lsm_idx}")
+            }
         }
     }
-    println!("  A_PropertyValue_Write PropertyId=5 (LoadStateControl) = 01 Start");
-    println!("  A_PropertyValue_Write PropertyId=5 (LoadStateControl) = 03 RelativeAllocation");
-    println!("  A_PropertyValue_Write PropertyId=5 (LoadStateControl) = 02 Complete");
-    println!("  A_PropertyValue_Write PropertyId=5 (LoadStateControl) = 04 Unload");
+
+    // Read the image back through the inverse decoders and diff against the
+    // project values. This is the dry-run half of the ETS byte-identity check
+    // (the other half is reading a real device over the transport).
+    let decoded = knx_prod::read_back_device(&ap, &image)?;
+    println!("\nRead-back self-check:");
+    let mut diffs = 0usize;
+    for (id, value) in &values {
+        if let Some(decoded_value) = decoded.parameters.get(id) {
+            if decoded_value != value {
+                println!("  param {id}: project {value} != decoded {decoded_value}");
+                diffs += 1;
+            }
+        }
+    }
+    if decoded.links != links {
+        println!("  links differ: project {links:?}");
+        println!("              decoded {:?}", decoded.links);
+        diffs += 1;
+    }
+    if diffs == 0 {
+        println!("  OK: project parameters and links round-trip through the image");
+    } else {
+        println!("  {diffs} difference(s)");
+    }
+
     println!("\n(not sent — USB cEMI transport is not implemented yet)");
     Ok(())
 }

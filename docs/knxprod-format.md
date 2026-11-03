@@ -112,7 +112,9 @@ Form-engine rules (`crates/knx-form`):
 
 Not yet parsed (download builder, M2/M5):
 
-- `LoadProcedures` contents (load-sequence ops).
+- `LoadProcedures` contents (load-sequence ops) — parsed in M5 as
+  `LoadProcedures`/`LoadProcedure`/`LoadStep` and emitted by
+  `knx_prod::download_plan`.
 - `Assign` value computation (M2).
 - The exact `ComObjectTable` *memory* byte format — the knxprod segment
   (e.g. `AS-4400` on the Time Switch) packs descriptors with the DPT, not the
@@ -154,8 +156,9 @@ The three System B tables are built per `03_05_01 §4.16/4.17/4.18` and are
 `knxcfg tables` dumps the overlaid GO table and the *visible* ASAP numbering
 (`active_group_objects`, choose/when filtered). `knx_prod::build_device_image`
 combines the parameter image with the three tables at their knxprod header
-offsets; `knxcfg download <ia>` is a dry run that prints the result and the
-`A_Memory_Write`/load-control plan.
+offsets; `knx_prod::read_back_device` decodes the image back to parameters
+and links. `knxcfg download <ia>` is a dry run that prints the result, the
+`A_Memory_Write`/load-control plan, and a read-back self-check.
 
 `knxcfg memory <knxprod> <h2p>` prints the segment map, the parameter
 placements, a hex dump of the parameter segments, and a template self-check.

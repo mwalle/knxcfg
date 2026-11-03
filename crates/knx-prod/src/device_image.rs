@@ -38,6 +38,15 @@ pub struct DeviceImage {
     pub group_object_table: Option<TablePlacement>,
 }
 
+/// The project-relevant configuration decoded back out of a device image.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct DeviceConfiguration {
+    /// Parameter id (or `module-instance-id/param-id`) → value string.
+    pub parameters: HashMap<String, String>,
+    /// Links as `(ASAP, raw 16-bit group address)`, sorted by ASAP.
+    pub links: Vec<(u16, u16)>,
+}
+
 /// A table overlaid into a code segment.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TablePlacement {
@@ -145,6 +154,166 @@ pub fn build_device_image(
     })
 }
 
+/// Decode a built device image back into project-relevant configuration.
+///
+/// This is the read-back half of M5: parameters are read from their `<Memory>`
+/// placements, and group-object links are decoded from the GrAT/GrOAT. It is
+/// the inverse of [`build_device_image`] and is what the verify/download
+/// read-back step will compare against the original project values.
+pub fn read_back_device(
+    ap: &ApplicationProgram,
+    image: &DeviceImage,
+) -> Result<DeviceConfiguration> {
+    let parameters = crate::memory::decode_parameter_image(ap, &image.segments)?;
+
+    let mut links = Vec::new();
+    if let (Some(at), Some(oat)) = (&image.address_table, &image.association_table) {
+        let address_bytes = segment_slice(&image.segments, &at.segment_id, at.offset);
+        let association_bytes = segment_slice(&image.segments, &oat.segment_id, oat.offset);
+        links = tables::read_links(address_bytes, association_bytes)?;
+    }
+
+    Ok(DeviceConfiguration { parameters, links })
+}
+
+fn segment_slice<'a>(segments: &'a [SegmentImage], id: &str, offset: usize) -> &'a [u8] {
+    segments
+        .iter()
+        .find(|s| s.id == id)
+        .and_then(|s| s.data.get(offset..))
+        .unwrap_or_default()
+}
+
+/// One concrete step of the download sequence, ready to be encoded as cEMI
+/// management messages by the transport layer (M4).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DownloadStep {
+    Connect,
+    Disconnect,
+    Restart,
+    CompareProp {
+        obj_idx: u8,
+        prop_id: u8,
+        inline_data: Vec<u8>,
+    },
+    Unload {
+        lsm_idx: u8,
+    },
+    Load {
+        lsm_idx: u8,
+    },
+    AbsSegment {
+        lsm_idx: u8,
+        seg_type: u8,
+        address: u32,
+        size: usize,
+        access: u8,
+        mem_type: u8,
+        seg_flags: u8,
+        data: Vec<u8>,
+    },
+    TaskSegment {
+        lsm_idx: u8,
+        address: u32,
+    },
+    LoadCompleted {
+        lsm_idx: u8,
+    },
+}
+
+/// Build the download sequence from the knxprod `<LoadProcedure>` and the
+/// assembled [`DeviceImage`].
+///
+/// The knxprod load procedure is the authoritative download sequence — the
+/// same sequence ETS follows (`docs/ets5-findings.md`). Absolute segments are
+/// matched to the image buffers by their device address.
+pub fn download_plan(ap: &ApplicationProgram, image: &DeviceImage) -> Result<Vec<DownloadStep>> {
+    let static_ = ap
+        .static_
+        .as_ref()
+        .ok_or_else(|| anyhow!("application program has no <Static>"))?;
+    let procedure = static_
+        .load_procedures
+        .as_ref()
+        .and_then(|p| p.items.first())
+        .ok_or_else(|| anyhow!("application program has no <LoadProcedure>"))?;
+
+    let segments_by_address: HashMap<u32, &SegmentImage> = image
+        .segments
+        .iter()
+        .filter_map(|s| {
+            let address = s.address.parse::<u32>().ok()?;
+            Some((address, s))
+        })
+        .collect();
+
+    let mut out = Vec::new();
+    for step in &procedure.steps {
+        match step {
+            crate::LoadStep::Connect => out.push(DownloadStep::Connect),
+            crate::LoadStep::Disconnect => out.push(DownloadStep::Disconnect),
+            crate::LoadStep::Restart => out.push(DownloadStep::Restart),
+            crate::LoadStep::Unload(s) => out.push(DownloadStep::Unload {
+                lsm_idx: s.lsm_idx.parse().unwrap_or(0),
+            }),
+            crate::LoadStep::Load(s) => out.push(DownloadStep::Load {
+                lsm_idx: s.lsm_idx.parse().unwrap_or(0),
+            }),
+            crate::LoadStep::LoadCompleted(s) => out.push(DownloadStep::LoadCompleted {
+                lsm_idx: s.lsm_idx.parse().unwrap_or(0),
+            }),
+            crate::LoadStep::TaskSegment(s) => out.push(DownloadStep::TaskSegment {
+                lsm_idx: s.lsm_idx.parse().unwrap_or(0),
+                address: s.address.parse().unwrap_or(0),
+            }),
+            crate::LoadStep::CompareProp(s) => out.push(DownloadStep::CompareProp {
+                obj_idx: s.obj_idx.parse().unwrap_or(0),
+                prop_id: s.prop_id.parse().unwrap_or(0),
+                inline_data: parse_hex_bytes(&s.inline_data),
+            }),
+            crate::LoadStep::AbsSegment(s) => {
+                let address = s.address.parse::<u32>().unwrap_or(0);
+                let size = s.size.parse::<usize>().unwrap_or(0);
+                let segment = segments_by_address.get(&address).ok_or_else(|| {
+                    anyhow!(
+                        "load procedure references address {} but no image segment has that address",
+                        address
+                    )
+                })?;
+                let mut data = segment.data.clone();
+                if data.len() != size {
+                    data.resize(size, 0);
+                }
+                out.push(DownloadStep::AbsSegment {
+                    lsm_idx: s.lsm_idx.parse().unwrap_or(0),
+                    seg_type: s.seg_type.parse().unwrap_or(0),
+                    address,
+                    size,
+                    access: s.access.parse().unwrap_or(0),
+                    mem_type: s.mem_type.parse().unwrap_or(0),
+                    seg_flags: s.seg_flags.parse().unwrap_or(0),
+                    data,
+                });
+            }
+            crate::LoadStep::Other => {}
+        }
+    }
+
+    Ok(out)
+}
+
+fn parse_hex_bytes(s: &str) -> Vec<u8> {
+    let compact: String = s.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.len() % 2 != 0 {
+        return Vec::new();
+    }
+    compact
+        .as_bytes()
+        .chunks(2)
+        .filter_map(|c| u8::from_str_radix(std::str::from_utf8(c).unwrap_or(""), 16).ok())
+        .collect()
+}
+
 /// Overlay `bytes` into a segment at `offset`, returning an error if it does
 /// not fit.
 fn overlay_bytes(
@@ -247,5 +416,76 @@ mod tests {
         assert_eq!((t.segment_id.as_str(), t.offset, t.len), ("AS-4201", 0, 3));
         let t = image.group_object_table.as_ref().unwrap();
         assert_eq!((t.segment_id.as_str(), t.offset, t.len), ("AS-4400", 0, 8));
+
+        let config = read_back_device(&ap, &image).unwrap();
+        assert_eq!(config.links, links);
+        assert!(config.parameters.is_empty());
+    }
+
+    #[test]
+    fn download_plan_follows_knxprod_load_procedure() {
+        let static_ = crate::Static {
+            code: Some(crate::Code {
+                absolute: vec![crate::Segment {
+                    id: "AS-4000".into(),
+                    size: "4".into(),
+                    address: "16384".into(),
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }),
+            load_procedures: Some(crate::LoadProcedures {
+                items: vec![crate::LoadProcedure {
+                    steps: vec![
+                        crate::LoadStep::Connect,
+                        crate::LoadStep::Unload(crate::LdCtrlUnload { lsm_idx: "1".into() }),
+                        crate::LoadStep::Load(crate::LdCtrlLoad { lsm_idx: "1".into() }),
+                        crate::LoadStep::AbsSegment(crate::LdCtrlAbsSegment {
+                            lsm_idx: "1".into(),
+                            seg_type: "0".into(),
+                            address: "16384".into(),
+                            size: "4".into(),
+                            access: "255".into(),
+                            mem_type: "3".into(),
+                            seg_flags: "128".into(),
+                        }),
+                        crate::LoadStep::TaskSegment(crate::LdCtrlTaskSegment {
+                            lsm_idx: "1".into(),
+                            address: "16384".into(),
+                        }),
+                        crate::LoadStep::LoadCompleted(crate::LdCtrlLoadCompleted {
+                            lsm_idx: "1".into(),
+                        }),
+                        crate::LoadStep::Restart,
+                        crate::LoadStep::Disconnect,
+                    ],
+                }],
+            }),
+            ..Default::default()
+        };
+        let ap = crate::ApplicationProgram {
+            static_: Some(static_),
+            ..Default::default()
+        };
+        let image = build_device_image(&ap, &HashMap::new(), &[]).unwrap();
+        let plan = download_plan(&ap, &image).unwrap();
+
+        assert_eq!(plan.len(), 8);
+        assert_eq!(plan[0], DownloadStep::Connect);
+        assert_eq!(plan[1], DownloadStep::Unload { lsm_idx: 1 });
+        assert_eq!(
+            plan[3],
+            DownloadStep::AbsSegment {
+                lsm_idx: 1,
+                seg_type: 0,
+                address: 16384,
+                size: 4,
+                access: 255,
+                mem_type: 3,
+                seg_flags: 128,
+                data: vec![0, 0, 0, 0],
+            }
+        );
+        assert_eq!(plan[7], DownloadStep::Disconnect);
     }
 }

@@ -151,6 +151,10 @@ pub struct Static {
     /// Header of the association table (entries are written at download).
     #[serde(rename = "AssociationTable", default)]
     pub association_table: Option<Table>,
+    /// The device's load procedure(s): the exact download sequence (unload,
+    /// load, absolute segments, task segments, load-completed, restart).
+    #[serde(rename = "LoadProcedures", default)]
+    pub load_procedures: Option<LoadProcedures>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -514,6 +518,99 @@ pub struct Table {
     pub max_entries: String,
 }
 
+/// The `<LoadProcedures>` element: one or more load procedures.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LoadProcedures {
+    #[serde(rename = "LoadProcedure", default)]
+    pub items: Vec<LoadProcedure>,
+}
+
+/// One `<LoadProcedure>`: a heterogeneous sequence of load-control steps.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LoadProcedure {
+    #[serde(rename = "$value", default)]
+    pub steps: Vec<LoadStep>,
+}
+
+/// One step of a load procedure.
+#[derive(Debug, Deserialize, Clone)]
+pub enum LoadStep {
+    #[serde(rename = "LdCtrlConnect")]
+    Connect,
+    #[serde(rename = "LdCtrlDisconnect")]
+    Disconnect,
+    #[serde(rename = "LdCtrlRestart")]
+    Restart,
+    #[serde(rename = "LdCtrlUnload")]
+    Unload(LdCtrlUnload),
+    #[serde(rename = "LdCtrlLoad")]
+    Load(LdCtrlLoad),
+    #[serde(rename = "LdCtrlAbsSegment")]
+    AbsSegment(LdCtrlAbsSegment),
+    #[serde(rename = "LdCtrlTaskSegment")]
+    TaskSegment(LdCtrlTaskSegment),
+    #[serde(rename = "LdCtrlLoadCompleted")]
+    LoadCompleted(LdCtrlLoadCompleted),
+    #[serde(rename = "LdCtrlCompareProp")]
+    CompareProp(LdCtrlCompareProp),
+    #[serde(other)]
+    Other,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlUnload {
+    #[serde(rename = "@LsmIdx", default)]
+    pub lsm_idx: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlLoad {
+    #[serde(rename = "@LsmIdx", default)]
+    pub lsm_idx: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlLoadCompleted {
+    #[serde(rename = "@LsmIdx", default)]
+    pub lsm_idx: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlTaskSegment {
+    #[serde(rename = "@LsmIdx", default)]
+    pub lsm_idx: String,
+    #[serde(rename = "@Address", default)]
+    pub address: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlCompareProp {
+    #[serde(rename = "@InlineData", default)]
+    pub inline_data: String,
+    #[serde(rename = "@ObjIdx", default)]
+    pub obj_idx: String,
+    #[serde(rename = "@PropId", default)]
+    pub prop_id: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlAbsSegment {
+    #[serde(rename = "@LsmIdx", default)]
+    pub lsm_idx: String,
+    #[serde(rename = "@SegType", default)]
+    pub seg_type: String,
+    #[serde(rename = "@Address", default)]
+    pub address: String,
+    #[serde(rename = "@Size", default)]
+    pub size: String,
+    #[serde(rename = "@Access", default)]
+    pub access: String,
+    #[serde(rename = "@MemType", default)]
+    pub mem_type: String,
+    #[serde(rename = "@SegFlags", default)]
+    pub seg_flags: String,
+}
+
 /// Strip a UTF-8 BOM if present (some knxprod files start with one).
 fn strip_bom(s: &str) -> &str {
     s.strip_prefix('\u{feff}').unwrap_or(s)
@@ -564,5 +661,30 @@ mod tests {
         assert_eq!(p.unions().count(), 1);
         let u = p.unions().next().unwrap();
         assert_eq!(u.parameters.len(), 2);
+    }
+
+    #[test]
+    fn load_procedure_parses_heterogeneous_steps() {
+        let xml = r#"
+        <LoadProcedures>
+          <LoadProcedure>
+            <LdCtrlConnect />
+            <LdCtrlUnload LsmIdx="1" />
+            <LdCtrlLoad LsmIdx="1" />
+            <LdCtrlAbsSegment LsmIdx="1" SegType="0" Address="16384" Size="513" Access="255" MemType="3" SegFlags="128" />
+            <LdCtrlTaskSegment LsmIdx="1" Address="16384" />
+            <LdCtrlLoadCompleted LsmIdx="1" />
+            <LdCtrlRestart />
+            <LdCtrlDisconnect />
+          </LoadProcedure>
+        </LoadProcedures>"#;
+        let p: LoadProcedures = quick_xml::de::from_str(xml).unwrap();
+        assert_eq!(p.items.len(), 1);
+        let steps = &p.items[0].steps;
+        assert_eq!(steps.len(), 8);
+        assert!(matches!(steps[0], LoadStep::Connect));
+        assert!(matches!(steps[1], LoadStep::Unload(_)));
+        assert!(matches!(steps[3], LoadStep::AbsSegment(_)));
+        assert!(matches!(steps[7], LoadStep::Disconnect));
     }
 }

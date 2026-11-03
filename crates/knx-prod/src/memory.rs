@@ -164,6 +164,68 @@ pub fn check_template(ap: &ApplicationProgram) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// Read the parameter values back out of a built memory image.
+///
+/// This is the inverse of [`build_parameter_image`]: it walks exactly the same
+/// device-level and module-parameter placements (all module instances, because
+/// memory allocation is static) and decodes the current bits into value
+/// strings using the knxprod parameter types.
+pub fn decode_parameter_image(
+    ap: &ApplicationProgram,
+    segments: &[SegmentImage],
+) -> Result<HashMap<String, String>> {
+    let static_ = ap
+        .static_
+        .as_ref()
+        .ok_or_else(|| anyhow::anyhow!("application program has no <Static>"))?;
+
+    let types: HashMap<&str, &ParameterType> = static_
+        .parameter_types
+        .as_ref()
+        .map(|pt| pt.items.iter().map(|t| (t.id.as_str(), t)).collect())
+        .unwrap_or_default();
+
+    let segment_data: HashMap<&str, &[u8]> = segments
+        .iter()
+        .map(|s| (s.id.as_str(), s.data.as_slice()))
+        .collect();
+
+    let mut values = HashMap::new();
+
+    for param in device_parameters(static_) {
+        if let Some(mem) = &param.memory {
+            let Some(data) = segment_data.get(mem.code_segment.as_str()) else {
+                continue;
+            };
+            if let Some(value) = read_parameter_value(param, &types, 0, data) {
+                values.insert(param.id.clone(), value);
+            }
+        }
+    }
+
+    let modules: HashMap<&str, &ModuleDef> = ap
+        .module_defs
+        .as_ref()
+        .map(|m| m.items.iter().map(|m| (m.id.as_str(), m)).collect())
+        .unwrap_or_default();
+    if let Some(dynamic) = &ap.dynamic {
+        let mut instances = Vec::new();
+        collect_module_instances(&dynamic.nodes, &modules, &mut instances);
+        for located in instances {
+            read_module_parameter_values(
+                located.instance,
+                located.module,
+                &located.prefix,
+                &types,
+                &segment_data,
+                &mut values,
+            );
+        }
+    }
+
+    Ok(values)
+}
+
 /// Decoded template bytes per segment id.
 fn segment_templates(static_: &Static) -> HashMap<String, Vec<u8>> {
     static_
@@ -500,6 +562,157 @@ fn bits_differ(a: &[u8], b: &[u8], abs_bit: usize, bit_len: usize) -> bool {
     false
 }
 
+fn read_parameter_value(
+    param: &Parameter,
+    types: &HashMap<&str, &ParameterType>,
+    base: usize,
+    data: &[u8],
+) -> Option<String> {
+    let mem = param.memory.as_ref()?;
+    let rel_offset: usize = mem.offset.parse().unwrap_or(0);
+    let bit_offset: usize = mem.bit_offset.parse().unwrap_or(0);
+    let abs_bit = (base + rel_offset) * 8 + bit_offset;
+    let type_ = types.get(param.parameter_type.as_str()).copied();
+    decode_value(type_, data, abs_bit)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn read_module_parameter_values(
+    instance: &ModuleInstance,
+    module: &ModuleDef,
+    prefix: &str,
+    types: &HashMap<&str, &ParameterType>,
+    segment_data: &HashMap<&str, &[u8]>,
+    values: &mut HashMap<String, String>,
+) {
+    let Some(static_) = &module.static_ else {
+        return;
+    };
+    let Some(parameters) = &static_.parameters else {
+        return;
+    };
+
+    for node in &parameters.nodes {
+        match node {
+            ParamNode::Parameter(param) => {
+                let Some(mem) = &param.memory else {
+                    continue;
+                };
+                if mem.base_offset.is_empty() {
+                    continue;
+                }
+                let Some(base) = instance
+                    .arg_value(&mem.base_offset)
+                    .and_then(|v| v.parse::<usize>().ok())
+                else {
+                    continue;
+                };
+                let Some(data) = segment_data.get(mem.code_segment.as_str()) else {
+                    continue;
+                };
+                let key = format!("{prefix}/{}", param.id);
+                if let Some(value) = read_parameter_value(param, types, base, data) {
+                    values.insert(key, value);
+                }
+            }
+            ParamNode::Union(union) => {
+                let mem = union.memory.as_ref();
+                let base = mem
+                    .filter(|m| !m.base_offset.is_empty())
+                    .and_then(|m| instance.arg_value(&m.base_offset))
+                    .and_then(|v| v.parse::<usize>().ok());
+                let Some(base) = base else {
+                    continue;
+                };
+                for param in &union.parameters {
+                    let mut p = param.clone();
+                    if p.memory.is_none() {
+                        p.memory = mem.cloned();
+                    }
+                    let Some(mem2) = &p.memory else {
+                        continue;
+                    };
+                    let Some(data) = segment_data.get(mem2.code_segment.as_str()) else {
+                        continue;
+                    };
+                    let key = format!("{prefix}/{}", param.id);
+                    if let Some(value) = read_parameter_value(&p, types, base, data) {
+                        values.insert(key, value);
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn decode_value(type_: Option<&ParameterType>, data: &[u8], abs_bit: usize) -> Option<String> {
+    let t = type_?;
+
+    if let Some(r) = &t.restriction {
+        let bit_len: usize = r.size_in_bit.parse().unwrap_or(0);
+        return Some(read_bits(data, abs_bit, bit_len).to_string());
+    }
+    if let Some(n) = &t.number {
+        let bit_len: usize = n.size_in_bit.parse().unwrap_or(0);
+        let raw = read_bits(data, abs_bit, bit_len);
+        if n.type_ == "signedInt" {
+            return Some(sign_extend(raw, bit_len).to_string());
+        }
+        return Some(raw.to_string());
+    }
+    if let Some(txt) = &t.text {
+        let bit_len: usize = txt.size_in_bit.parse().unwrap_or(0);
+        let bytes = read_bytes(data, abs_bit, bit_len / 8);
+        let mut end = bytes.len();
+        while end > 0 && bytes[end - 1] == 0 {
+            end -= 1;
+        }
+        return Some(String::from_utf8_lossy(&bytes[..end]).into_owned());
+    }
+    if t.ip_address.is_some() {
+        let bytes = read_bytes(data, abs_bit, 4);
+        return Some(format!("{}.{}.{}.{}", bytes[0], bytes[1], bytes[2], bytes[3]));
+    }
+
+    None
+}
+
+fn read_bits(buf: &[u8], abs_bit: usize, bit_len: usize) -> u64 {
+    let mut value = 0u64;
+    for i in 0..bit_len {
+        let pos = abs_bit + i;
+        let byte = pos / 8;
+        let bit = 7 - (pos % 8);
+        let b = buf.get(byte).map(|x| (x >> bit) & 1).unwrap_or(0);
+        value = (value << 1) | (b as u64);
+    }
+    value
+}
+
+fn read_bytes(buf: &[u8], abs_bit: usize, len: usize) -> Vec<u8> {
+    let mut out = Vec::with_capacity(len);
+    for i in 0..len {
+        out.push(read_bits(buf, abs_bit + i * 8, 8) as u8);
+    }
+    out
+}
+
+fn sign_extend(raw: u64, bit_len: usize) -> i64 {
+    if bit_len == 0 {
+        return 0;
+    }
+    if bit_len >= 64 {
+        return raw as i64;
+    }
+    let mask = (1u64 << bit_len) - 1;
+    let value = raw & mask;
+    if value & (1u64 << (bit_len - 1)) != 0 {
+        (value as i64) - (1i64 << bit_len)
+    } else {
+        value as i64
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -621,5 +834,105 @@ mod tests {
         let p = &image.placements[0];
         assert_eq!(p.offset, 448);
         assert_eq!(p.param_id, "MD-1_M-1/MD-1_P-1");
+    }
+
+    #[test]
+    fn decode_parameter_image_roundtrips_device_and_module() {
+        use crate::{Argument, Arguments, Dynamic, Memory, ModuleDefs, Parameters, Segment, Static, TextArg};
+
+        let pt = ParameterType {
+            id: "PT-1".into(),
+            number: Some(crate::TypeNumber {
+                size_in_bit: "8".into(),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let module = crate::ModuleDef {
+            id: "MD-1".into(),
+            name: "M".into(),
+            arguments: Some(Arguments {
+                items: vec![Argument {
+                    id: "MD-1_A-1".into(),
+                    name: "ParamOffs".into(),
+                    allocates: "54".into(),
+                    ..Default::default()
+                }],
+            }),
+            static_: Some(Static {
+                parameters: Some(Parameters {
+                    nodes: vec![ParamNode::Parameter(Parameter {
+                        id: "MD-1_P-1".into(),
+                        parameter_type: "PT-1".into(),
+                        value: "42".into(),
+                        memory: Some(Memory {
+                            code_segment: "AS".into(),
+                            offset: "432".into(),
+                            base_offset: "MD-1_A-1".into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })],
+                }),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+
+        let instance = crate::ModuleInstance {
+            id: "MD-1_M-1".into(),
+            ref_id: "MD-1".into(),
+            args: vec![crate::Arg::Text(TextArg {
+                ref_id: "MD-1_A-1".into(),
+                value: "16".into(),
+            })],
+            ..Default::default()
+        };
+
+        let ap = ApplicationProgram {
+            static_: Some(Static {
+                parameter_types: Some(crate::ParameterTypes { items: vec![pt] }),
+                parameters: Some(Parameters {
+                    nodes: vec![ParamNode::Parameter(Parameter {
+                        id: "P-1".into(),
+                        parameter_type: "PT-1".into(),
+                        value: "1".into(),
+                        memory: Some(Memory {
+                            code_segment: "AS".into(),
+                            offset: "0".into(),
+                            ..Default::default()
+                        }),
+                        ..Default::default()
+                    })],
+                }),
+                code: Some(crate::Code {
+                    absolute: vec![Segment {
+                        id: "AS".into(),
+                        size: "600".into(),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                ..Default::default()
+            }),
+            dynamic: Some(Dynamic {
+                nodes: vec![UiNode::Module(instance)],
+            }),
+            module_defs: Some(ModuleDefs { items: vec![module] }),
+            ..Default::default()
+        };
+
+        let mut values = HashMap::new();
+        values.insert("P-1".to_string(), "9".to_string());
+        values.insert("MD-1_M-1/MD-1_P-1".to_string(), "7".to_string());
+        let image = build_parameter_image(&ap, &values).unwrap();
+
+        let decoded = decode_parameter_image(&ap, &image.segments).unwrap();
+        assert_eq!(decoded.get("P-1").map(String::as_str), Some("9"));
+        assert_eq!(
+            decoded.get("MD-1_M-1/MD-1_P-1").map(String::as_str),
+            Some("7")
+        );
     }
 }

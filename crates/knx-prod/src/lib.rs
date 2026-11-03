@@ -26,12 +26,16 @@ use std::path::{Path, PathBuf};
 
 pub use app::{
     ApplicationProgram, Argument, Arguments, Code, ComObject, ComObjects, ComObjectTable,
-    Enumeration, Language, Languages, Memory, ModuleDef, ModuleDefs, ParamNode, Parameter,
-    ParameterRef, ParameterRefs, ParameterType, ParameterTypes, Parameters, Segment, Static,
-    Table, Translation, TranslationElement, TranslationUnit, TypeNumber, TypeRestriction,
-    TypeText, Union,
+    Enumeration, Language, Languages, LdCtrlAbsSegment, LdCtrlCompareProp, LdCtrlLoad,
+    LdCtrlLoadCompleted, LdCtrlTaskSegment, LdCtrlUnload, LoadProcedure, LoadProcedures,
+    LoadStep, Memory, ModuleDef, ModuleDefs, ParamNode, Parameter, ParameterRef, ParameterRefs,
+    ParameterType, ParameterTypes, Parameters, Segment, Static, Table, Translation,
+    TranslationElement, TranslationUnit, TypeNumber, TypeRestriction, TypeText, Union,
 };
-pub use device_image::{build_device_image, DeviceImage, TablePlacement};
+pub use device_image::{
+    build_device_image, download_plan, read_back_device, DeviceConfiguration, DeviceImage,
+    DownloadStep, TablePlacement,
+};
 pub use memory::{build_parameter_image, check_template, MemoryImage, Placement, SegmentImage};
 pub use dynamic::{
     Arg, Assign, Channel, ChannelIndependentBlock, Choose, ComObjectRefRef, Dynamic,

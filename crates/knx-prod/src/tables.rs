@@ -26,6 +26,8 @@
 
 use std::collections::HashMap;
 
+use anyhow::{bail, Result};
+
 use crate::{
     ApplicationProgram, Choose, ModuleDef, ModuleInstance, Parameter, ParameterRef, Static, UiNode,
     When,
@@ -505,6 +507,79 @@ pub fn build_association_table(mut assocs: Vec<Association>) -> Vec<u8> {
     out
 }
 
+/// Decode a Group Address Table byte slice into its 16-bit group addresses,
+/// in TSAP order (index 0 → TSAP 1). The input starts at the table's length
+/// octet and may include trailing bytes (they are ignored).
+pub fn read_group_address_table(data: &[u8]) -> Result<Vec<u16>> {
+    let Some(&count) = data.first() else {
+        bail!("empty Group Address Table");
+    };
+    let count = count as usize;
+    if count < 1 {
+        bail!("Group Address Table length is zero");
+    }
+    let ga_count = count - 1; // length counts the individual address too.
+    let needed = 3 + ga_count * 2;
+    if data.len() < needed {
+        bail!(
+            "Group Address Table truncated: need {} bytes, have {}",
+            needed,
+            data.len()
+        );
+    }
+    let mut gas = Vec::with_capacity(ga_count);
+    for i in 0..ga_count {
+        let off = 3 + i * 2;
+        gas.push(u16::from_be_bytes([data[off], data[off + 1]]));
+    }
+    Ok(gas)
+}
+
+/// Decode an Association Table (format 0) byte slice. The input starts at the
+/// table's length octet and may include trailing bytes.
+pub fn read_association_table(data: &[u8]) -> Result<Vec<Association>> {
+    let Some(&count) = data.first() else {
+        bail!("empty Association Table");
+    };
+    let count = count as usize;
+    let needed = 1 + count * 2;
+    if data.len() < needed {
+        bail!(
+            "Association Table truncated: need {} bytes, have {}",
+            needed,
+            data.len()
+        );
+    }
+    let mut assocs = Vec::with_capacity(count);
+    for i in 0..count {
+        let off = 1 + i * 2;
+        assocs.push(Association {
+            tsap: data[off] as u16,
+            asap: data[off + 1] as u16,
+        });
+    }
+    Ok(assocs)
+}
+
+/// Decode the project links `(ASAP, group address)` from a GrAT and a GrOAT
+/// byte slice. Unused association entries (TSAP 0) are skipped.
+pub fn read_links(address: &[u8], association: &[u8]) -> Result<Vec<(u16, u16)>> {
+    let gas = read_group_address_table(address)?;
+    let assocs = read_association_table(association)?;
+    let mut links = Vec::with_capacity(assocs.len());
+    for a in assocs {
+        if a.tsap == 0 {
+            continue;
+        }
+        let Some(&ga) = gas.get((a.tsap - 1) as usize) else {
+            bail!("Association TSAP {} out of range", a.tsap);
+        };
+        links.push((a.asap, ga));
+    }
+    links.sort_by_key(|(asap, _)| *asap);
+    Ok(links)
+}
+
 /// Build the Group Object Table (Realisation Type 7) bytes.
 ///
 /// One 4-octet descriptor per group object, in ASAP order (index 0 → ASAP 0).
@@ -679,6 +754,13 @@ mod tests {
         let device = build_device_tables(&[], &links);
         assert_eq!(address, device.address);
         assert_eq!(association, device.association);
+    }
+
+    #[test]
+    fn read_links_roundtrips() {
+        let links = vec![(0u16, 0x000Au16), (6, 0x000B), (23, 0x000C)];
+        let (address, association) = build_address_and_association_tables(&links);
+        assert_eq!(read_links(&address, &association).unwrap(), links);
     }
 
     #[test]
