@@ -136,12 +136,31 @@ fn group_objects_impl(
 ) -> Vec<(u16, GroupObject)> {
     let mut out = Vec::new();
 
-    // Device-level group objects are always present.
+    // Device-level group objects. In visible-only mode they are emitted only
+    // when their `ComObjectRef` is selected by the device `Dynamic` tree.
     if let Some(static_) = &ap.static_ {
         if let Some(t) = &static_.com_object_table {
-            for co in &t.items {
-                let asap = co.number.parse::<u16>().unwrap_or(0);
-                out.push((asap, group_object_of(co)));
+            if visible_only {
+                let ref_by_base =
+                    visible_refs_for_static(static_, ap.dynamic.as_ref(), values, "");
+                let has_refs = static_
+                    .com_object_refs
+                    .as_ref()
+                    .map(|r| !r.items.is_empty())
+                    .unwrap_or(false);
+                for co in &t.items {
+                    if !has_refs {
+                        let asap = co.number.parse::<u16>().unwrap_or(0);
+                        out.push((asap, group_object_of(co)));
+                    } else if let Some(com_ref) = ref_by_base.get(co.id.as_str()) {
+                        out.push(group_object_of_ref(co, com_ref));
+                    }
+                }
+            } else {
+                for co in &t.items {
+                    let asap = co.number.parse::<u16>().unwrap_or(0);
+                    out.push((asap, group_object_of(co)));
+                }
             }
         }
     }
@@ -164,7 +183,7 @@ fn group_objects_impl(
                 "",
                 &mut instances,
             );
-            push_module_group_objects(&instances, &mut out);
+            push_visible_module_group_objects(&instances, values, &mut out);
         } else {
             let mut instances = Vec::new();
             collect_module_instances(&dynamic.nodes, &modules, &mut instances);
@@ -194,17 +213,166 @@ fn push_module_group_objects(
             continue;
         };
         for co in &com_objs.items {
-            let number = co.number.parse::<u16>().unwrap_or(0);
-            // BaseNumber argument default 0 (device-level of the module).
-            let base = if co.base_number.is_empty() {
-                0
-            } else {
-                instance
-                    .arg_value(&co.base_number)
-                    .and_then(|v| v.parse::<u16>().ok())
-                    .unwrap_or(0)
-            };
-            out.push((base + number, group_object_of(co)));
+            out.push(module_group_object(instance, co));
+        }
+    }
+}
+
+/// Push the group objects for the *visible* module instances, resolving each
+/// object through the `ComObjectRef` selected by the module's `Dynamic` tree
+/// (the `ComObjectRefRef` elements). The `ComObjectRef` may override the base
+/// `ComObject` ObjectSize and flags per channel mode.
+fn push_visible_module_group_objects(
+    instances: &[(&ModuleInstance, &ModuleDef, String)],
+    values: &HashMap<String, String>,
+    out: &mut Vec<(u16, GroupObject)>,
+) {
+    for (instance, module, prefix) in instances {
+        let Some(static_) = &module.static_ else {
+            continue;
+        };
+        let Some(com_objs) = &static_.com_objects else {
+            continue;
+        };
+
+        // Resolve the visible `ComObjectRef` for each base `ComObject` (when
+        // the module has a Dynamic tree). When the module defines no
+        // `ComObjectRef`s at all, every base object is always visible;
+        // otherwise only the objects selected by a `ComObjectRefRef` are
+        // visible, and the rest keep the template's default flags.
+        let ref_by_base = visible_refs_for_static(static_, module.dynamic.as_ref(), values, prefix);
+        let has_refs = static_
+            .com_object_refs
+            .as_ref()
+            .map(|r| !r.items.is_empty())
+            .unwrap_or(false);
+
+        for co in &com_objs.items {
+            if !has_refs {
+                out.push(module_group_object(instance, co));
+            } else if let Some(com_ref) = ref_by_base.get(co.id.as_str()) {
+                out.push(module_group_object_ref(instance, co, com_ref));
+            }
+        }
+    }
+}
+
+fn module_group_object(instance: &ModuleInstance, co: &crate::ComObject) -> (u16, GroupObject) {
+    let number = co.number.parse::<u16>().unwrap_or(0);
+    let base = module_go_base(instance, co);
+    (base + number, group_object_of(co))
+}
+
+fn module_group_object_ref(
+    instance: &ModuleInstance,
+    co: &crate::ComObject,
+    com_ref: &crate::ComObjectRef,
+) -> (u16, GroupObject) {
+    let merged = merged_com_object(co, com_ref);
+    let number = merged.number.parse::<u16>().unwrap_or(0);
+    let base = module_go_base(instance, &merged);
+    (base + number, group_object_of(&merged))
+}
+
+/// A device-level group object resolved through its `ComObjectRef` override.
+fn group_object_of_ref(
+    co: &crate::ComObject,
+    com_ref: &crate::ComObjectRef,
+) -> (u16, GroupObject) {
+    let merged = merged_com_object(co, com_ref);
+    let asap = merged.number.parse::<u16>().unwrap_or(0);
+    (asap, group_object_of(&merged))
+}
+
+/// Merge a `ComObjectRef`'s non-empty overrides onto its base `ComObject`.
+fn merged_com_object(
+    co: &crate::ComObject,
+    com_ref: &crate::ComObjectRef,
+) -> crate::ComObject {
+    let mut merged = co.clone();
+    if !com_ref.object_size.is_empty() {
+        merged.object_size = com_ref.object_size.clone();
+    }
+    if !com_ref.read_flag.is_empty() {
+        merged.read_flag = com_ref.read_flag.clone();
+    }
+    if !com_ref.write_flag.is_empty() {
+        merged.write_flag = com_ref.write_flag.clone();
+    }
+    if !com_ref.communication_flag.is_empty() {
+        merged.communication_flag = com_ref.communication_flag.clone();
+    }
+    if !com_ref.transmit_flag.is_empty() {
+        merged.transmit_flag = com_ref.transmit_flag.clone();
+    }
+    if !com_ref.update_flag.is_empty() {
+        merged.update_flag = com_ref.update_flag.clone();
+    }
+    if !com_ref.read_on_init_flag.is_empty() {
+        merged.read_on_init_flag = com_ref.read_on_init_flag.clone();
+    }
+    merged
+}
+
+fn module_go_base(instance: &ModuleInstance, co: &crate::ComObject) -> u16 {
+    if co.base_number.is_empty() {
+        0
+    } else {
+        instance
+            .arg_value(&co.base_number)
+            .and_then(|v| v.parse::<u16>().ok())
+            .unwrap_or(0)
+    }
+}
+
+/// Resolve the `ComObjectRef`s selected by the *visible* branches of a
+/// `Dynamic` tree (device-level or a module definition), keyed by their base
+/// `ComObject` id. Objects without an entry are not visible.
+fn visible_refs_for_static<'a>(
+    static_: &'a crate::Static,
+    dynamic: Option<&crate::Dynamic>,
+    values: &HashMap<String, String>,
+    prefix: &str,
+) -> HashMap<&'a str, &'a crate::ComObjectRef> {
+    let mut ref_by_base = HashMap::new();
+    let Some(dynamic) = dynamic else {
+        return ref_by_base;
+    };
+    let ctx = build_table_ctx(Some(static_));
+    let mut ref_ids = Vec::new();
+    collect_visible_com_object_refs(&dynamic.nodes, &ctx, values, prefix, &mut ref_ids);
+    if let Some(com_refs) = &static_.com_object_refs {
+        for ref_id in ref_ids {
+            if let Some(com_ref) = com_refs.items.iter().find(|r| r.id == ref_id) {
+                ref_by_base.insert(com_ref.ref_id.as_str(), com_ref);
+            }
+        }
+    }
+    ref_by_base
+}
+
+/// Collect the `ComObjectRefRef` ids in the *visible* branches of a module's
+/// `Dynamic` tree, mirroring the form engine's `choose`/`when` rules.
+fn collect_visible_com_object_refs(
+    nodes: &[UiNode],
+    ctx: &TableCtx,
+    values: &HashMap<String, String>,
+    prefix: &str,
+    out: &mut Vec<String>,
+) {
+    for node in nodes {
+        match node {
+            UiNode::ComObjectRefRef(r) => out.push(r.ref_id.clone()),
+            UiNode::Choose(choose) => {
+                if let Some(when) = pick_visible_when(choose, ctx, values, prefix) {
+                    collect_visible_com_object_refs(&when.nodes, ctx, values, prefix, out);
+                }
+            }
+            _ => {
+                if let Some(children) = node.children() {
+                    collect_visible_com_object_refs(children, ctx, values, prefix, out);
+                }
+            }
         }
     }
 }
@@ -346,8 +514,12 @@ fn pick_visible_when<'a>(
     choose
         .whens
         .iter()
-        .find(|w| !w.is_default() && w.test == current)
+        .find(|w| !w.is_default() && test_matches(&w.test, &current))
         .or_else(|| choose.whens.iter().find(|w| w.is_default()))
+}
+
+fn test_matches(test: &str, current: &str) -> bool {
+    test.split_whitespace().any(|t| t == current)
 }
 
 fn current_param_value(
@@ -594,20 +766,23 @@ pub fn build_group_object_table(objects: &[GroupObject]) -> Vec<u8> {
     out
 }
 
-/// Overlay the group object **flags** onto a knxprod `ComObjectTable` segment
+/// Overlay the group object **flags** onto a knxprod `ComObjectTable`
 /// template, keeping the template's `data_pointer` (and trailing octets).
 ///
 /// The authoritative realisation of the mask-0705 GoT: the knxprod template
 /// already carries each object's `data_pointer` (value address) in its first
-/// octet; ETS only rewrites the **flags** octet (and the end marker).
+/// octet; ETS only rewrites the **flags** octet.
 ///
-/// `flags_by_record` maps the GoT record index (== ASAP, 0-based) to the
-/// realized `GroupObjectFlags`.
+/// The template's header record (first record) carries the entry count in its
+/// first octet; the following records are the group-object slots in ASAP
+/// order. `flags_by_asap` maps the 0-based ASAP to the final flags octet for
+/// the *visible* objects. Slots not present in the map are hidden/inactive:
+/// they keep the template's own slot flags with the communication bit cleared.
 pub fn overlay_group_object_table(
     template: &[u8],
-    flags_by_record: &std::collections::HashMap<usize, GroupObjectFlags>,
+    flags_by_asap: &HashMap<u16, u8>,
 ) -> Vec<u8> {
-    overlay_group_object_table_at(template, 0, flags_by_record)
+    overlay_group_object_table_at(template, 0, flags_by_asap)
 }
 
 /// Like [`overlay_group_object_table`], but the GoT starts at `base_offset`
@@ -615,20 +790,29 @@ pub fn overlay_group_object_table(
 pub fn overlay_group_object_table_at(
     template: &[u8],
     base_offset: usize,
-    flags_by_record: &std::collections::HashMap<usize, GroupObjectFlags>,
+    flags_by_asap: &HashMap<u16, u8>,
 ) -> Vec<u8> {
     let mut out = template.to_vec();
-    for (idx, flags) in flags_by_record {
-        let offset = base_offset + idx * 4;
-        if offset + 1 < out.len() {
-            out[offset + 1] = go_descriptor_high(*flags);
+    let Some(entry_count) = group_object_table_entry_count(template, base_offset) else {
+        return out;
+    };
+    let mut slot = base_offset + 4; // skip the header record
+    for asap in 0..entry_count as u16 {
+        if slot + 1 >= out.len() {
+            break;
         }
+        let flags = flags_by_asap
+            .get(&asap)
+            .copied()
+            .unwrap_or(out[slot + 1] & !COMMUNICATION_FLAG);
+        out[slot + 1] = flags;
+        slot += 4;
     }
     out
 }
 
-/// High octet of the memory-mapped GO descriptor — the **Config Octet** of
-/// `03_05_01 §4.18.3.1.2`/`§4.18.4.1` (RT1/RT2, used by mask 0705 System B):
+/// Flag bits (bits 7..2) of the memory-mapped Group Object Descriptor
+/// Config Octet (`03_05_01 §4.18.4.1`, used by mask 0705 System B):
 ///
 /// | bit | name | meaning |
 /// |----:|------|---------|
@@ -638,20 +822,57 @@ pub fn overlay_group_object_table_at(
 /// | 4   | Write enable | set → 1 |
 /// | 3   | Read enable | set → 1 |
 /// | 2   | Communication enable | set → 1 |
-/// | 1..0| Transmission priority | 00b system, 01b normal, 10b urgent, 11b low |
 ///
-/// NOTE: this is the *memory* config octet, which differs from the 2-octet
-/// property descriptor in Table 87 (where bit 5 = Value Read on init).
+/// Bit 5 is the **segment selector** (always 0 = segment 00h here), *not* the
+/// System-B “value read on init” flag — that feature is not supported by this
+/// memory-mapped layout (ETS greys the checkbox out), so it is never encoded.
+/// The transmission priority (bits 1..0) is **not** encoded here — it is
+/// taken from the knxprod GoT template's slot octet (see
+/// [`visible_group_object_flags`] and [`overlay_group_object_table_at`]).
 pub fn go_descriptor_high(f: GroupObjectFlags) -> u8 {
     let mut b = 0u8;
     if f.update { b |= 0x80; }
     if f.transmit { b |= 0x40; }
-    // segment selector bit 5 = 0 (segment 00h) by default.
+    // bit 5 = segment selector = 0 (segment 00h).
     if f.write { b |= 0x10; }
     if f.read { b |= 0x08; }
     if f.communicate { b |= 0x04; }
-    // bits 1..0 = transmission priority = 00b (system)
     b
+}
+
+/// Table 87 bit 2: communication enable.
+pub const COMMUNICATION_FLAG: u8 = 0x04;
+
+/// Table 87 bits 1..0: transmission priority mask.
+pub const PRIORITY_MASK: u8 = 0x03;
+
+/// Compose the final GoT flags octet for a *visible* group object.
+///
+/// The flag bits (7..2) come from the resolved knxprod `ComObject`/
+/// `ComObjectRef`; the transmission priority (1..0) is taken from the knxprod
+/// GoT template's own slot octet. The communication bit is cleared for
+/// objects that are not linked to a group address, because an unlinked object
+/// cannot communicate.
+pub fn visible_group_object_flags(
+    flags: GroupObjectFlags,
+    template_slot_flags: u8,
+    linked: bool,
+) -> u8 {
+    let mut b = go_descriptor_high(flags) | (template_slot_flags & PRIORITY_MASK);
+    if !linked {
+        b &= !COMMUNICATION_FLAG;
+    }
+    b
+}
+
+/// The number of group-object slots in a GoT template.
+///
+/// The template's leading header record carries the entry count in its first
+/// octet (`Current Size`, see `03_05_01 §4.18.3.1`). For the MDT mask-0705
+/// oracle this is `0x19` = 25 slots in a 26-record template (header + 25 GO
+/// slots).
+pub fn group_object_table_entry_count(template: &[u8], base_offset: usize) -> Option<usize> {
+    template.get(base_offset).copied().map(|n| n as usize)
 }
 
 #[cfg(test)]
@@ -691,22 +912,28 @@ mod tests {
             update: false,
             read_on_init: true,
         };
-        // Config octet (RT2): update=0, transmit=1, segment=0, write=1,
-        // read=0, comm=1, priority=00 → 0b0101_0100 = 0x54.
+        // Config octet (RT2): update=0, transmit=1, segment-selector=0,
+        // write=1, read=0, comm=1 → 0b0101_0100 = 0x54 (priority not included).
         assert_eq!(go_descriptor_high(f), 0x54);
     }
 
     #[test]
     fn overlay_group_object_table_keeps_data_pointer() {
-        // 2 records; record 1 has flags 0xdf in the template.
-        let template = [0x19, 0xdf, 0x00, 0x07, 0x1a, 0xdf, 0x00, 0x07];
+        // Header record (entry count 2) + two GO slots (flags 0xdf).
+        let template = [
+            0x02, 0x07, 0x00, 0x07, // header
+            0x1a, 0xdf, 0x00, 0x07, // ASAP 0
+            0x22, 0xdf, 0x00, 0x07, // ASAP 1
+        ];
         let mut map = std::collections::HashMap::new();
-        map.insert(1, GroupObjectFlags { communicate: false, ..Default::default() });
+        map.insert(0u16, 0x4f);
         let out = overlay_group_object_table(&template, &map);
-        // record 0 unchanged.
-        assert_eq!(&out[0..4], &[0x19, 0xdf, 0x00, 0x07]);
-        // record 1: data_pointer 0x1a kept, flags rewritten (all off → 0x00).
-        assert_eq!(&out[4..8], &[0x1a, 0x00, 0x00, 0x07]);
+        // header record unchanged.
+        assert_eq!(&out[0..4], &[0x02, 0x07, 0x00, 0x07]);
+        // ASAP 0: visible flags 0x4f, data_pointer 0x1a kept.
+        assert_eq!(&out[4..8], &[0x1a, 0x4f, 0x00, 0x07]);
+        // ASAP 1: hidden → template slot flags 0xdf with comm cleared = 0xdb.
+        assert_eq!(&out[8..12], &[0x22, 0xdb, 0x00, 0x07]);
     }
 
     #[test]
@@ -737,14 +964,17 @@ mod tests {
     fn overlay_group_object_table_at_applies_base_offset() {
         let template = [
             0xAA, 0xAA, 0xAA, 0xAA, // prefix before GoT
-            0x19, 0xdf, 0x00, 0x07, 0x1a, 0xdf, 0x00, 0x07,
+            0x02, 0x07, 0x00, 0x07, // header (entry count 2)
+            0x1a, 0xdf, 0x00, 0x07, // ASAP 0
+            0x22, 0xdf, 0x00, 0x07, // ASAP 1
         ];
         let mut map = std::collections::HashMap::new();
-        map.insert(1, GroupObjectFlags { communicate: false, ..Default::default() });
+        map.insert(1u16, 0x4f);
         let out = overlay_group_object_table_at(&template, 4, &map);
         assert_eq!(&out[0..4], &[0xAA, 0xAA, 0xAA, 0xAA]);
-        assert_eq!(&out[4..8], &[0x19, 0xdf, 0x00, 0x07]);
-        assert_eq!(&out[8..12], &[0x1a, 0x00, 0x00, 0x07]);
+        assert_eq!(&out[4..8], &[0x02, 0x07, 0x00, 0x07]); // header unchanged
+        assert_eq!(&out[8..12], &[0x1a, 0xdb, 0x00, 0x07]); // ASAP 0 hidden
+        assert_eq!(&out[12..16], &[0x22, 0x4f, 0x00, 0x07]); // ASAP 1 visible
     }
 
     #[test]

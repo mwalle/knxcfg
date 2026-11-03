@@ -141,6 +141,10 @@ pub struct Static {
     /// `<ComObjectTable>`.
     #[serde(rename = "ComObjects", default)]
     pub com_objects: Option<ComObjects>,
+    /// Per-context group-object overrides (ObjectSize/DPT/flags). Referenced
+    /// from the `Dynamic` tree by `ComObjectRefRef`.
+    #[serde(rename = "ComObjectRefs", default)]
+    pub com_object_refs: Option<ComObjectRefs>,
     /// The `<Code>` element: memory segments (application code, parameter
     /// image, group-object/address/association tables).
     #[serde(rename = "Code", default)]
@@ -177,6 +181,43 @@ pub struct ParameterRef {
 pub struct ComObjects {
     #[serde(rename = "ComObject", default)]
     pub items: Vec<ComObject>,
+}
+
+/// A list of `ComObjectRef` overrides.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ComObjectRefs {
+    #[serde(rename = "ComObjectRef", default)]
+    pub items: Vec<ComObjectRef>,
+}
+
+/// A context-specific override for a `ComObject` (e.g. the same object can be
+/// 1 Bit in one channel mode and 4 Bytes in another).
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct ComObjectRef {
+    #[serde(rename = "@Id", default)]
+    pub id: String,
+    #[serde(rename = "@RefId", default)]
+    pub ref_id: String,
+    #[serde(rename = "@Text", default)]
+    pub text: String,
+    #[serde(rename = "@FunctionText", default)]
+    pub function_text: String,
+    #[serde(rename = "@ObjectSize", default)]
+    pub object_size: String,
+    #[serde(rename = "@ReadFlag", default)]
+    pub read_flag: String,
+    #[serde(rename = "@WriteFlag", default)]
+    pub write_flag: String,
+    #[serde(rename = "@CommunicationFlag", default)]
+    pub communication_flag: String,
+    #[serde(rename = "@TransmitFlag", default)]
+    pub transmit_flag: String,
+    #[serde(rename = "@UpdateFlag", default)]
+    pub update_flag: String,
+    #[serde(rename = "@ReadOnInitFlag", default)]
+    pub read_on_init_flag: String,
+    #[serde(rename = "@DatapointType", default)]
+    pub datapoint_type: String,
 }
 
 /// Reusable parameter/GO definitions, instantiated per channel.

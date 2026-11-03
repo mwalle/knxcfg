@@ -25,12 +25,12 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 pub use app::{
-    ApplicationProgram, Argument, Arguments, Code, ComObject, ComObjects, ComObjectTable,
-    Enumeration, Language, Languages, LdCtrlAbsSegment, LdCtrlCompareProp, LdCtrlLoad,
-    LdCtrlLoadCompleted, LdCtrlTaskSegment, LdCtrlUnload, LoadProcedure, LoadProcedures,
-    LoadStep, Memory, ModuleDef, ModuleDefs, ParamNode, Parameter, ParameterRef, ParameterRefs,
-    ParameterType, ParameterTypes, Parameters, Segment, Static, Table, Translation,
-    TranslationElement, TranslationUnit, TypeNumber, TypeRestriction, TypeText, Union,
+    ApplicationProgram, Argument, Arguments, Code, ComObject, ComObjectRef, ComObjectRefs,
+    ComObjects, ComObjectTable, Enumeration, Language, Languages, LdCtrlAbsSegment,
+    LdCtrlCompareProp, LdCtrlLoad, LdCtrlLoadCompleted, LdCtrlTaskSegment, LdCtrlUnload,
+    LoadProcedure, LoadProcedures, LoadStep, Memory, ModuleDef, ModuleDefs, ParamNode, Parameter,
+    ParameterRef, ParameterRefs, ParameterType, ParameterTypes, Parameters, Segment, Static, Table,
+    Translation, TranslationElement, TranslationUnit, TypeNumber, TypeRestriction, TypeText, Union,
 };
 pub use device_image::{
     build_device_image, download_plan, read_back_device, DeviceConfiguration, DeviceImage,

@@ -291,7 +291,7 @@ fn pick_branch<'a>(
     choose
         .whens
         .iter()
-        .find(|w| !w.is_default() && w.test == current)
+        .find(|w| !w.is_default() && w.test.split_whitespace().any(|t| t == current))
         .or_else(|| choose.whens.iter().find(|w| w.is_default()))
 }
 

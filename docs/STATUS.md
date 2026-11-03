@@ -81,9 +81,12 @@ ETS5-oracle-checked against a real download (`docs/ets5-findings.md`, ETS's
 `CommunicationTableFormatterSystem7`):
 - **GrAT** = `[len:1][IA:2][GA:2×N]` (big-endian, ascending)
 - **GrOAT** = `[len:1][TSAP:1][ASAP:1]×N`
-- **GoT** = 4 octets/GO `[data_pointer][flags][00][vft]`, no length prefix;
-  produced by *overlaying flags onto the knxprod template* (the data pointer
-  is baked into the template, not computed).
+- **GoT** = 4 octets/GO `[data_pointer][flags][00][template]`, no length
+  prefix; 26 records = 1 header + 25 GO slots (`record = ASAP + 1`). Produced
+  by *overlaying flags onto the knxprod template*: the data pointer and the
+  trailing two octets are template-fixed; only the flags octet is rewritten
+  (Table 87 high octet, priority taken from the template placeholder,
+  communication cleared for unlinked objects).
 - GO ASAP = `base + Number` (`BaseObj`/`ObjNumberBase`/`BaseNumber` args),
   verified: Eingang A=0–5, B=6–11, Logic=12–23, "In Betrieb"=24.
 Done since: full device image assembly (`knx_prod::build_device_image`) —

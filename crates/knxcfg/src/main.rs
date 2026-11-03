@@ -524,12 +524,28 @@ fn cmd_tables(file: &PathBuf, h2p: &str) -> Result<()> {
             .and_then(|s| s.code.as_ref())
             .and_then(|c| c.by_id(&t.code_segment))
         {
-            let flags: HashMap<usize, knx_prod::tables::GroupObjectFlags> = objects
-                .iter()
-                .map(|(asap, obj)| (*asap as usize, obj.flags))
-                .collect();
             let offset = t.offset.parse::<usize>().unwrap_or(0);
-            knx_prod::tables::overlay_group_object_table_at(&seg.decoded_data(), offset, &flags)
+            let template = seg.decoded_data();
+            // No project links here: every visible object is unlinked, so
+            // ETS would clear its communication bit.
+            let flags: HashMap<u16, u8> = objects
+                .iter()
+                .map(|(asap, obj)| {
+                    let slot_flags = template
+                        .get(offset + (*asap as usize + 1) * 4 + 1)
+                        .copied()
+                        .unwrap_or(0);
+                    (
+                        *asap,
+                        knx_prod::tables::visible_group_object_flags(
+                            obj.flags,
+                            slot_flags,
+                            false,
+                        ),
+                    )
+                })
+                .collect();
+            knx_prod::tables::overlay_group_object_table_at(&template, offset, &flags)
         } else {
             let descriptors: Vec<knx_prod::tables::GroupObject> =
                 objects.iter().map(|(_, o)| o.clone()).collect();

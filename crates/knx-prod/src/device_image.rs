@@ -13,12 +13,12 @@
 //! to the device with `A_Memory_Write` (and the load-state machine driven with
 //! `A_PropertyValue_Write` PropertyId 5 — see `docs/ets5-findings.md`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use anyhow::{anyhow, Result};
 
 use crate::memory::{build_parameter_image, SegmentImage};
-use crate::tables::{self, GroupObject, GroupObjectFlags};
+use crate::tables::{self, GroupObject};
 use crate::ApplicationProgram;
 
 /// A complete device memory image, ready for the download sequence.
@@ -121,13 +121,35 @@ pub fn build_device_image(
     }
 
     // Group Object Table: overlay flags onto the shipped template (the data
-    // pointer octet is baked into the knxprod template, not computed).
+    // pointer octet is baked into the knxprod template, not computed). The
+    // template's own placeholder octet supplies the priority bits; hidden
+    // objects keep the template flags with communication cleared.
     let mut group_object_table = None;
     if let Some(t) = &static_.com_object_table {
         let offset = t.offset.parse::<usize>().unwrap_or(0);
-        let flags_by_record: HashMap<usize, GroupObjectFlags> = active
+        let segment = image
+            .segments
             .iter()
-            .map(|(asap, obj)| (*asap as usize, obj.flags))
+            .find(|s| s.id == t.code_segment)
+            .ok_or_else(|| anyhow!("GoT segment {} not found", t.code_segment))?;
+        let linked: HashSet<u16> = active_links.iter().map(|(asap, _)| *asap).collect();
+        let flags_by_asap: HashMap<u16, u8> = active
+            .iter()
+            .map(|(asap, obj)| {
+                let slot_flags = segment
+                    .data
+                    .get(offset + (*asap as usize + 1) * 4 + 1)
+                    .copied()
+                    .unwrap_or(0);
+                (
+                    *asap,
+                    tables::visible_group_object_flags(
+                        obj.flags,
+                        slot_flags,
+                        linked.contains(asap),
+                    ),
+                )
+            })
             .collect();
 
         let segment = image
@@ -135,7 +157,7 @@ pub fn build_device_image(
             .iter_mut()
             .find(|s| s.id == t.code_segment)
             .ok_or_else(|| anyhow!("GoT segment {} not found", t.code_segment))?;
-        let overlaid = tables::overlay_group_object_table_at(&segment.data, offset, &flags_by_record);
+        let overlaid = tables::overlay_group_object_table_at(&segment.data, offset, &flags_by_asap);
         let len = overlaid.len().saturating_sub(offset);
         segment.data = overlaid;
         group_object_table = Some(TablePlacement {
@@ -367,6 +389,8 @@ mod tests {
                         id: "AS-4400".into(),
                         size: "8".into(),
                         address: "17408".into(),
+                        // header (entry count 1) + one GO slot (flags 0xdf).
+                        data: Some("AQcABxrfAAc=".into()),
                         ..Default::default()
                     },
                 ],
@@ -407,8 +431,10 @@ mod tests {
         assert_eq!(&seg("AS-4000").data[0..5], &[0x02, 0x00, 0x00, 0x00, 0x0A]);
         // GrOAT: length 1, entry TSAP 1 / ASAP 0.
         assert_eq!(&seg("AS-4201").data[0..3], &[0x01, 0x01, 0x00]);
-        // GoT: data pointer 0 (template), flags 0x04 (comm), 0x00, vft 0.
-        assert_eq!(&seg("AS-4400").data[0..4], &[0x00, 0x04, 0x00, 0x00]);
+        // GoT: header [entry-count][07][00][07] unchanged; ASAP 0 gets
+        // flags 0x07 (comm + low priority from the template slot), linked.
+        assert_eq!(&seg("AS-4400").data[0..4], &[0x01, 0x07, 0x00, 0x07]);
+        assert_eq!(&seg("AS-4400").data[4..8], &[0x1a, 0x07, 0x00, 0x07]);
 
         let t = image.address_table.as_ref().unwrap();
         assert_eq!((t.segment_id.as_str(), t.offset, t.len), ("AS-4000", 0, 5));
