@@ -964,6 +964,24 @@ fn cmd_edit(dir: &Path, ia_str: &str, knxprod_override: Option<&Path>) -> Result
         values.insert(p.id.clone(), yaml_to_string(&p.value));
     }
 
+    // Snapshot the values shown by the form for the *initial* configuration.
+    // When the user edits a field and then puts it back, it ends up equal to
+    // this snapshot; we drop such entries so saving an unchanged default does
+    // not pollute the device YAML.
+    let lang = if ap.default_language.is_empty() {
+        "en-US".to_string()
+    } else {
+        ap.default_language.clone()
+    };
+    let mut initial_display: HashMap<String, String> = HashMap::new();
+    for page in knx_form::evaluate(&ap, &values, &lang) {
+        for section in &page.sections {
+            for field in &section.fields {
+                initial_display.insert(field.id.clone(), field.value.clone());
+            }
+        }
+    }
+
     let saved = tui::edit_device(&ap, &values)?;
     if let Some(new_values) = saved {
         let dev = project
@@ -973,6 +991,12 @@ fn cmd_edit(dir: &Path, ia_str: &str, knxprod_override: Option<&Path>) -> Result
             .ok_or_else(|| anyhow::anyhow!("device {ia} not found"))?;
         let mut params: Vec<ParameterValue> = new_values
             .into_iter()
+            .filter(|(id, value)| {
+                // Keep anything that was already stored, but only store a
+                // newly-edited value if it differs from what the form showed
+                // before editing (i.e. it is not just the default again).
+                values.contains_key(id) || initial_display.get(id) != Some(value)
+            })
             .map(|(id, value)| ParameterValue {
                 id,
                 value: serde_yaml::Value::String(value),
