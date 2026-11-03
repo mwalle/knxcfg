@@ -125,11 +125,11 @@ compared with an ETS download. The plan is encoded as cEMI frames
 `PID_TABLE_REFERENCE` at run time.
 **M4** (USB transport, in progress): USB HID framing, `hidraw`, the EMI
 handshake, the TL connection and DD0/memory reads are implemented and
-tested against scripted mocks; **not yet run against a real interface or
-device**. Still to do: first hardware run, `A_PropertyValue_Read/Write`
-responses, `NM_IndividualAddress_Read/Write`, executing a download plan
-(incl. `LdCtrlWriteRelMem`), cEMI `PID_COMM_MODE` for interfaces that do not
-start in data link layer mode.
+tested against scripted mocks. First hardware run: Device Feature
+handshake OK, but no `L_Data.con` for `T_Connect` (cEMI mode not set; fixed
+by `PID_COMM_MODE`, re-test pending). Still to do: a working hardware run,
+`A_PropertyValue_Read/Write` responses, `NM_IndividualAddress_Read/Write`,
+executing a download plan (incl. `LdCtrlWriteRelMem`).
 Next: finish **M4** with a hardware run, then live download/read-back ·
 **M2** `.knxproj` import (also the way to get ETS parameter images to compare
 against) · **M3** `.knxproj` export · **M6** hardening.
