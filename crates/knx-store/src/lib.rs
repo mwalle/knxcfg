@@ -55,8 +55,22 @@ pub fn save(dir: &Path, project: &Project) -> Result<()> {
 
     let devices_dir = dir.join(DEVICES_DIR);
     fs::create_dir_all(&devices_dir)?;
+    let mut keep = std::collections::HashSet::new();
     for dev in &p.devices {
-        write_yaml(&devices_dir.join(format!("{}.yaml", dev.ia)), dev)?;
+        let name = format!("{}.yaml", dev.ia);
+        write_yaml(&devices_dir.join(&name), dev)?;
+        keep.insert(name);
+    }
+    // Remove the files of devices that are no longer in the project, so a
+    // removed device does not come back on the next load.
+    for entry in fs::read_dir(&devices_dir)? {
+        let path = entry?.path();
+        let Some(name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if name.ends_with(".yaml") && !keep.contains(name) {
+            fs::remove_file(&path).with_context(|| format!("removing {}", path.display()))?;
+        }
     }
     Ok(())
 }
@@ -155,6 +169,25 @@ mod tests {
         expected.sort();
         assert_eq!(loaded, expected);
 
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn removed_devices_are_deleted() {
+        let dir = std::env::temp_dir().join("knx-store-remove");
+        let _ = fs::remove_dir_all(&dir);
+        let mut project = Project::default();
+        project.devices.push(DeviceInstance {
+            ia: "1.1.3".parse().unwrap(),
+            parameters: vec![],
+            links: vec![],
+        });
+        save(&dir, &project).unwrap();
+        assert!(dir.join("devices/1.1.3.yaml").is_file());
+        project.devices.clear();
+        save(&dir, &project).unwrap();
+        assert!(!dir.join("devices/1.1.3.yaml").exists());
+        assert!(load(&dir).unwrap().devices.is_empty());
         let _ = fs::remove_dir_all(&dir);
     }
 }
