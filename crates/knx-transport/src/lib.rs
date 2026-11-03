@@ -11,6 +11,9 @@
 use anyhow::{anyhow, Result};
 use std::time::Duration;
 
+pub mod apdu;
+pub mod cemi;
+
 /// cEMI message codes (`03_06_03 §4.1.1 Message code`).
 pub mod message_code {
     pub const L_RAW_REQ: u8 = 0x10;
