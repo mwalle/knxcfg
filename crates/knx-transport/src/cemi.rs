@@ -16,6 +16,7 @@
 //! [`crate::apdu`].
 
 use super::{message_code, CemiFrame};
+use anyhow::{bail, Result};
 
 /// Transport Control Field (TPCI) service codes (`03_03_04 Table 1`).
 ///
@@ -110,6 +111,77 @@ pub fn l_data_control(tpci: u8, src: u16, dst: u16) -> CemiFrame {
     l_data_req(tpci, src, dst, &[])
 }
 
+/// A received cEMI `L_Data` frame (`L_Data.ind` / `L_Data.con`,
+/// `03_06_03 §4.1.5.3`), split into its control fields, addresses and TPDU.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LData {
+    pub message_code: u8,
+    pub ctrl1: u8,
+    pub ctrl2: u8,
+    pub src: u16,
+    pub dst: u16,
+    /// TPCI/APCI octet followed by the `L` remaining TPDU octets.
+    pub tpdu: Vec<u8>,
+}
+
+impl LData {
+    pub fn parse(frame: &CemiFrame) -> Result<Self> {
+        let b = &frame.body;
+        if b.len() < 8 {
+            bail!("cEMI L_Data frame too short: {} octets", b.len());
+        }
+        let len = b[6] as usize;
+        if b.len() < 8 + len {
+            bail!("cEMI L_Data frame truncated: L={len}, {} TPDU octets", b.len() - 7);
+        }
+        Ok(Self {
+            message_code: frame.message_code,
+            ctrl1: b[0],
+            ctrl2: b[1],
+            src: u16::from_be_bytes([b[2], b[3]]),
+            dst: u16::from_be_bytes([b[4], b[5]]),
+            tpdu: b[7..8 + len].to_vec(),
+        })
+    }
+
+    /// Destination is a group address (`Ctrl2` bit 7, address type).
+    pub fn is_group(&self) -> bool {
+        self.ctrl2 & 0x80 != 0
+    }
+
+    /// Negative confirmation: Confirm flag set in `Ctrl1`
+    /// (`03_06_03 §4.1.5.3.4 L_Data.con`).
+    pub fn is_negative_confirm(&self) -> bool {
+        self.ctrl1 & 0x01 != 0
+    }
+
+    /// The TPCI: the whole first octet for control PDUs (`T_Connect`,
+    /// `T_ACK`, …), the six high bits for data PDUs.
+    pub fn tpci(&self) -> u8 {
+        if self.tpdu[0] & 0x80 != 0 {
+            self.tpdu[0]
+        } else {
+            self.tpdu[0] & 0xFC
+        }
+    }
+
+    /// Sequence number of a numbered TPDU (`03_03_04 §2`, bits 5..2).
+    pub fn seq(&self) -> u8 {
+        (self.tpdu[0] >> 2) & 0x0F
+    }
+
+    /// The APDU of a data PDU in the [`crate::apdu`] convention (TPCI bits
+    /// cleared); `None` for control PDUs.
+    pub fn apdu(&self) -> Option<Vec<u8>> {
+        if self.tpdu[0] & 0x80 != 0 {
+            return None;
+        }
+        let mut apdu = self.tpdu.clone();
+        apdu[0] &= 0x03;
+        Some(apdu)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -130,6 +202,22 @@ mod tests {
         // A_Restart on connection sequence 3: TPCI 01 0011 + APCI 11.
         let r = l_data_req(tpci::T_DATA_CONNECTED | tpci::seq(3), 0, 0x1001, &crate::apdu::restart());
         assert_eq!(&r.encode()[8..], &[0x01, 0x4F, 0x80]);
+    }
+
+    #[test]
+    fn l_data_parse() {
+        // A_Memory_Response from 1.1.1, connected seq 2, as an L_Data.ind.
+        let mut f = l_data_req(tpci::T_DATA_CONNECTED | tpci::seq(2), 0x1101, 0x0000, &[0x02, 0x42, 0x01, 0x00, 0xAB, 0xCD]);
+        f.message_code = message_code::L_DATA_IND;
+        let ld = LData::parse(&f).unwrap();
+        assert_eq!((ld.src, ld.dst, ld.tpci(), ld.seq()), (0x1101, 0, tpci::T_DATA_CONNECTED | tpci::seq(2), 2));
+        assert!(!ld.is_group() && !ld.is_negative_confirm());
+        assert_eq!(ld.apdu().unwrap(), vec![0x02, 0x42, 0x01, 0x00, 0xAB, 0xCD]);
+        let ack = LData::parse(&l_data_control(tpci::T_ACK | tpci::seq(5), 0x1101, 0)).unwrap();
+        assert_eq!((ack.tpci(), ack.seq(), ack.apdu()), (tpci::T_ACK | tpci::seq(5), 5, None));
+        let mut short = f.clone();
+        short.body.truncate(9);
+        assert!(LData::parse(&short).is_err());
     }
 
     #[test]

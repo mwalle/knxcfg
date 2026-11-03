@@ -8,6 +8,7 @@ use knx_core::{
 };
 use std::path::{Path, PathBuf};
 
+mod bus;
 mod download;
 mod product_store;
 mod tui;
@@ -154,6 +155,28 @@ enum Cmd {
         #[arg(long)]
         partial: bool,
     },
+    /// List the hidraw devices; KNX USB interfaces are marked
+    Interfaces,
+    /// Read a device's descriptor (mask version) over the bus
+    DeviceInfo {
+        /// Individual address, e.g. 1.1.1
+        ia: String,
+        /// USB interface (defaults to the only KNX one)
+        #[arg(short, long)]
+        interface: Option<PathBuf>,
+    },
+    /// Read device memory over the bus
+    MemRead {
+        /// Individual address, e.g. 1.1.1
+        ia: String,
+        /// Start address: 0x4000, 4000h or decimal
+        address: String,
+        /// Number of octets
+        count: usize,
+        /// USB interface (defaults to the only KNX one)
+        #[arg(short, long)]
+        interface: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -248,6 +271,11 @@ fn main() -> Result<()> {
         Cmd::Download { ia, knxprod, frames, partial } => {
             let dir = resolve_project(project.as_deref())?;
             cmd_download(&dir, &ia, knxprod.as_deref(), frames, partial)
+        }
+        Cmd::Interfaces => bus::cmd_interfaces(),
+        Cmd::DeviceInfo { ia, interface } => bus::cmd_device_info(interface.as_deref(), &ia),
+        Cmd::MemRead { ia, address, count, interface } => {
+            bus::cmd_mem_read(interface.as_deref(), &ia, &address, count)
         }
     }
 }

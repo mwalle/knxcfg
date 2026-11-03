@@ -242,7 +242,9 @@ Ground rules:
 5. **M3 — ETS project export**: our format → `.knxproj`, opens in ETS.
 6. **M4 — Transport**: USB cEMI tunnel (`09_03 §3 KNX USB Interface`), cEMI,
    management procedures. Able to read device descriptor + memory from a
-   real device.
+   real device. *(in progress — USB HID framing, Linux `hidraw`, cEMI
+   selection, TL connection, `knxcfg interfaces|device-info|mem-read`;
+   mock-tested, not yet run on hardware.)*
 7. **M5 — Download + read-back**: build + write parameter/GO/address memory
    image, verify by read-back. Oracle test vs ETS (same project → same
    bytes). Read-back: read a device's memory, decode parameters, GO table
@@ -274,7 +276,9 @@ Recorded (D1–D10):
 
 Still open:
 
-- **D4a** — which KNX spec document covers the USB transport (so we can
-  obtain and implement from it).
-- **D4b** — USB class (HID vs bulk) and max cEMI frame size for the
-  concrete interface you own.
+- **D4a** — *resolved*: `09_03 §3 KNX USB Interface` (see
+  `docs/spec-index.md`).
+- **D4b** — the spec fixes the class to HID with 64-octet interrupt reports
+  and up to 5 reports per frame (`09_03 §3.3.2`, `§3.4.1.2.2`); still open:
+  the maximum frame length of the concrete interface you own (TP-UART based
+  ones are limited to 64 octets, BCU based ones to standard frames).

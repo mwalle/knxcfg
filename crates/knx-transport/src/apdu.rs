@@ -12,8 +12,6 @@
 //!
 //! ## APCI encoding
 //!
-//! ## APCI encoding
-//!
 //! The Application Layer Control Information (APCI) is 10 bits wide
 //! (`03_03_07 Table 1`); services with a "4-bit" APCI use only its top four
 //! bits and carry data in the low six:
@@ -38,12 +36,16 @@
 //! > byte-level agreement with ETS is verified in the M4/M5 integration step
 //! > (the conformance-test oracle); see `docs/plan.md` §9.
 
+use anyhow::{bail, Result};
+
 /// 10-bit APCI codes (`03_03_07 Table 1`).
 pub mod apci {
     pub const MEMORY_READ: u16 = 0x200;
+    pub const MEMORY_RESPONSE: u16 = 0x240;
     pub const MEMORY_WRITE: u16 = 0x280;
     pub const INDIVIDUAL_ADDRESS_WRITE: u16 = 0x0C0;
     pub const DEVICE_DESCRIPTOR_READ: u16 = 0x300;
+    pub const DEVICE_DESCRIPTOR_RESPONSE: u16 = 0x340;
     pub const RESTART: u16 = 0x380;
     pub const PROPERTY_VALUE_READ: u16 = 0x3D5;
     pub const PROPERTY_VALUE_WRITE: u16 = 0x3D7;
@@ -127,6 +129,43 @@ pub fn individual_address_write(new_address: u16) -> Vec<u8> {
     out
 }
 
+/// Does `apdu` carry the service with the 4-bit APCI `apci` (the services
+/// whose low six APCI bits are data)?
+pub fn is_service4(apdu: &[u8], apci: u16) -> bool {
+    apdu.len() >= 2 && (((apdu[0] as u16 & 0x03) << 8) | apdu[1] as u16) & 0x3C0 == apci & 0x3C0
+}
+
+/// `A_DeviceDescriptor_Response` (`03_03_07 §3.4.2.1`):
+/// `[..11][01dddddd][descriptor]` → (descriptor type, descriptor octets).
+pub fn parse_device_descriptor_response(apdu: &[u8]) -> Result<(u8, Vec<u8>)> {
+    if !is_service4(apdu, apci::DEVICE_DESCRIPTOR_RESPONSE) {
+        bail!("not an A_DeviceDescriptor_Response: {apdu:02X?}");
+    }
+    let descriptor_type = apdu[1] & 0x3F;
+    if descriptor_type == 0x3F {
+        bail!("the device does not support this device descriptor type");
+    }
+    Ok((descriptor_type, apdu[2..].to_vec()))
+}
+
+/// `A_Memory_Response` (`03_03_07 §3.5.3`): `[..10][01nnnnnn][addr:2][data]`
+/// → (address, data). `nnnnnn = 0` (no data) is the negative response.
+pub fn parse_memory_response(apdu: &[u8]) -> Result<(u16, Vec<u8>)> {
+    if !is_service4(apdu, apci::MEMORY_RESPONSE) || apdu.len() < 4 {
+        bail!("not an A_Memory_Response: {apdu:02X?}");
+    }
+    let count = (apdu[1] & 0x3F) as usize;
+    let address = u16::from_be_bytes([apdu[2], apdu[3]]);
+    if count == 0 {
+        bail!("memory read at {address:04X}h refused by the device");
+    }
+    let data = &apdu[4..];
+    if data.len() != count {
+        bail!("A_Memory_Response at {address:04X}h: {count} octets announced, {} received", data.len());
+    }
+    Ok((address, data.to_vec()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -161,6 +200,16 @@ mod tests {
         let pdu = property_value_write(1, apci::PID_LOAD_STATE_CONTROL, 1, 1, &[0x04]);
         assert_eq!(pdu, vec![0x03, 0xD7, 0x01, 0x05, 0x10, 0x01, 0x04]);
         assert_eq!(property_value_read(0, 78, 1, 1), vec![0x03, 0xD5, 0x00, 0x4E, 0x10, 0x01]);
+    }
+
+    #[test]
+    fn response_parsing() {
+        assert_eq!(parse_device_descriptor_response(&[0x03, 0x40, 0x07, 0x05]).unwrap(), (0, vec![0x07, 0x05]));
+        assert!(parse_device_descriptor_response(&[0x03, 0x7F]).is_err());
+        assert!(parse_device_descriptor_response(&[0x02, 0x42]).is_err());
+        assert_eq!(parse_memory_response(&[0x02, 0x42, 0x01, 0x00, 0xAB, 0xCD]).unwrap(), (0x0100, vec![0xAB, 0xCD]));
+        assert!(parse_memory_response(&[0x02, 0x40, 0x01, 0x00]).is_err(), "negative response");
+        assert!(parse_memory_response(&[0x02, 0x43, 0x01, 0x00, 0xAB]).is_err(), "short data");
     }
 
     #[test]

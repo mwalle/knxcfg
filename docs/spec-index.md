@@ -18,12 +18,26 @@ Source: `09_03 Basic and System Components - Couplers`
 - `09_03 §3.4.1.2 KNX HID report header`
 - `09_03 §3.4.1.3 Data (KNX HID report body)` — incl. protocol version / identifiers
 - `09_03 §3.5 KNX USB bus access device requirements` — level 1 (USB) requirements
+- `09_03 §3.4.1.3.4 Protocol identifiers` — protocol ID / EMI ID coding
+- `09_03 §3.5.3.2 Device feature services` — Get/Response/Set/Info
+- `09_03 §3.5.3.3 Device features` — supported/active EMI type, bus
+  connection status
+
+## Transport Layer (connection-oriented)
+
+Source: `03_03_04 Transport Layer`
+
+- `03_03_04 §4 Parameters of Transport Layer` — 6 s connection timeout,
+  3 s acknowledgement timeout, `max_rep_count` 3
+- `03_03_04 §5 State Machine of Connection-Oriented Communication Mode` —
+  events E00–E27, actions A0–A15 (Style 1 implemented)
 
 ## cEMI framing
 
 Source: `03_06_03 EMI_IMI`
 
 - `03_06_03 §4.1 cEMI: message format and services`
+- `03_06_03 §4.1.5.3.4 L_Data.con` — Confirm flag (`Ctrl1` bit 0, 1 = error)
 - `03_06_03 §4.2.2.4.2.2 cEMI communication mode "cEMI Transport Layer"`
 - `03_06_03 §4.3 KNX extraneous information on cEMI connection` — protocol ID
   field in the host-protocol header

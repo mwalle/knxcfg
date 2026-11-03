@@ -63,7 +63,23 @@ D14 product store: project `vendor/` (default) + global
 - `knx-transport` — `CemiFrame`, `cemi::l_data_req` (TPCI and APCI share
   the first TPDU octet), `apdu::*` (`A_Memory_Read/Write`,
   `A_PropertyValue_Read/Write` with 12-bit start index, `A_Restart`, …),
-  `Transport` trait. No USB HID yet.
+  `Transport` trait, and (M4):
+  - `usb` — KNX USB HID framing (`09_03 §3.4`: report ID 01h, sequence
+    number/packet type, 8-octet transfer header in the start packet, up to
+    5 reports, reassembly with the spec's error handling), Device Feature
+    services (`09_03 §3.5.3`), `UsbTransport<D: HidDevice>`: on open it reads
+    the supported EMI types, requires cEMI and sets it as active EMI type,
+    tracks the bus connection status (Get + Info frames).
+  - `hidraw` (Linux) — `/dev/hidrawN` via `libc::poll`; enumeration from
+    sysfs; KNX interfaces are recognised by their report descriptor
+    (report ID 1, 63-octet input + output, vendor usage page), nothing is
+    sent to other HID devices.
+  - `cemi::LData` — parsed `L_Data.ind/.con` (Confirm flag, TPCI, seq, APDU).
+  - `mgmt` — `Connection`: `L_Data.con` per request (negative = error),
+    connection-oriented TL client (`03_03_04 §5`, Style 1: T_ACK/T_NAK, 3 s
+    ack timeout, 3 repetitions, re-ACK of repeated PDUs, T_NAK on a wrong
+    sequence number, remote T_Disconnect), `device_descriptor_read`,
+    `memory_read` (12-octet chunks).
 - `knxcfg` — CLI (`main.rs`, `product_store.rs`, `download.rs` plan → cEMI
   frames) + TUI (`tui.rs`; typed values are validated before they are taken).
 
@@ -80,7 +96,13 @@ knxcfg device-set <ia> <param> <value>         # validated; P-3 or MD-2_M-2/MD-2
 knxcfg edit <ia> [--knxprod <file>]            # TUI: Tab=pages, Enter=edit, s=save, q=quit
 knxcfg probe <h2p> | form <h2p> | memory <h2p> | tables <h2p>   [--knxprod <file>]
 knxcfg download <ia> [--knxprod F] [--partial] [--frames]   # dry run: image, tables, plan
+knxcfg interfaces                              # hidraw devices, KNX USB interfaces marked
+knxcfg device-info <ia> [-i /dev/hidrawN]      # mask version (DD0) over the bus
+knxcfg mem-read <ia> <addr> <count> [-i ...]   # hex dump; addr 0x4000 / 4000h / decimal
 ```
+Bus commands use `--interface` or the only KNX `hidraw` device. `/dev/hidraw*`
+is root-only by default; a udev rule (`SUBSYSTEM=="hidraw",
+ATTRS{idVendor}=="<vid>", TAG+="uaccess"`) gives the logged-in user access.
 knxprod files are resolved by h2p: `--knxprod` override → the path recorded at
 `add` time (D13; relative to the project when the file is inside it) →
 project `vendor/` → global store (`$XDG_DATA_HOME/knxcfg/knxprod`, default
@@ -98,7 +120,14 @@ parameter image and the System B tables are spec/knxprod-derived and not yet
 compared with an ETS download. The plan is encoded as cEMI frames
 (`download --frames`) except `LdCtrlWriteRelMem`, which needs the device's
 `PID_TABLE_REFERENCE` at run time.
-Next: **M4** USB cEMI transport (`09_03 §3`) and live download/read-back ·
+**M4** (USB transport, in progress): USB HID framing, `hidraw`, the EMI
+handshake, the TL connection and DD0/memory reads are implemented and
+tested against scripted mocks; **not yet run against a real interface or
+device**. Still to do: first hardware run, `A_PropertyValue_Read/Write`
+responses, `NM_IndividualAddress_Read/Write`, executing a download plan
+(incl. `LdCtrlWriteRelMem`), cEMI `PID_COMM_MODE` for interfaces that do not
+start in data link layer mode.
+Next: finish **M4** with a hardware run, then live download/read-back ·
 **M2** `.knxproj` import (also the way to get ETS parameter images to compare
 against) · **M3** `.knxproj` export · **M6** hardening.
 
@@ -114,7 +143,7 @@ against) · **M3** `.knxproj` export · **M6** hardening.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
-`cargo build --offline` · `cargo test --offline` (58 tests, incl. the ETS5
+`cargo build --offline` · `cargo test --offline` (79 tests, incl. the ETS5
 oracle regression test that reads `refs/knxprod`).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),
 zip, base64, clap, anyhow, thiserror, ratatui 0.28, crossterm 0.27.

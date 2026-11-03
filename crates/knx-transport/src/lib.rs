@@ -5,14 +5,20 @@
 //! - `09_03 §3 KNX USB Interface` — USB HID transport
 //! - `03_06_03 §4.1 cEMI: message format and services` — cEMI framing
 //!
-//! M4 milestone: USB HID transport. This crate currently provides the cEMI
-//! frame type and the transport trait.
+//! - [`usb`] — KNX USB HID framing and [`usb::UsbTransport`]
+//! - [`hidraw`] — Linux `/dev/hidraw*` access and KNX interface discovery
+//! - [`mgmt`] — data link confirmations and the connection-oriented
+//!   Transport Layer used for device management
 
 use anyhow::{anyhow, Result};
 use std::time::Duration;
 
 pub mod apdu;
 pub mod cemi;
+#[cfg(target_os = "linux")]
+pub mod hidraw;
+pub mod mgmt;
+pub mod usb;
 
 /// cEMI message codes (`03_06_03 §4.1.1 Message code`).
 pub mod message_code {
@@ -73,11 +79,6 @@ pub trait Transport {
     fn send(&mut self, frame: &CemiFrame) -> Result<()>;
     fn receive(&mut self, timeout: Duration) -> Result<CemiFrame>;
 }
-
-/// USB HID cEMI transport stub (`09_03 §3 KNX USB Interface`).
-///
-/// Implemented in M4.
-pub struct UsbTransport;
 
 #[cfg(test)]
 mod tests {
