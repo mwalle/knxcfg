@@ -8,6 +8,7 @@ use knx_core::{
 };
 use std::path::{Path, PathBuf};
 
+mod download;
 mod product_store;
 mod tui;
 
@@ -146,6 +147,9 @@ enum Cmd {
         /// knxprod file (defaults to the one recorded at `add` time)
         #[arg(long)]
         knxprod: Option<PathBuf>,
+        /// Also print the encoded cEMI management frames (M4/M5)
+        #[arg(long)]
+        frames: bool,
         /// Parameters only (partial download; MergedProcedure applications)
         #[arg(long)]
         partial: bool,
@@ -241,9 +245,9 @@ fn main() -> Result<()> {
         }
         Cmd::Export => bail!("`export` is not implemented yet (M3)"),
         Cmd::Import { .. } => bail!("`import` is not implemented yet (M2)"),
-        Cmd::Download { ia, knxprod, partial } => {
+        Cmd::Download { ia, knxprod, frames, partial } => {
             let dir = resolve_project(project.as_deref())?;
-            cmd_download(&dir, &ia, knxprod.as_deref(), partial)
+            cmd_download(&dir, &ia, knxprod.as_deref(), frames, partial)
         }
     }
 }
@@ -688,6 +692,7 @@ fn cmd_download(
     dir: &Path,
     ia_str: &str,
     knxprod_override: Option<&Path>,
+    show_frames: bool,
     partial: bool,
 ) -> Result<()> {
     let ia: IndividualAddress = ia_str.parse().with_context(|| format!("invalid IA {ia_str}"))?;
@@ -787,6 +792,15 @@ fn cmd_download(
         "\nEncoder/decoder consistency: {}",
         if diffs == 0 { "OK".to_string() } else { format!("{diffs} difference(s)") }
     );
+
+    if show_frames {
+        let frames = download::plan_to_frames(&plan, ia.to_u16())?;
+        println!("\nEncoded cEMI frames ({}):", frames.len());
+        for (i, f) in frames.iter().enumerate() {
+            let hex: Vec<String> = f.encode().iter().map(|b| format!("{b:02x}")).collect();
+            println!("  [{i:03}] {}", hex.join(" "));
+        }
+    }
 
     println!("\n(not sent — USB cEMI transport is not implemented yet)");
     Ok(())
