@@ -75,19 +75,27 @@ Done: M0 skeleton · M1 knxprod parser · M1.5 form engine · M1.6 project
 editing + TUI (incl. translations, access filtering, pages).
 In progress: **M5** memory-image builder — code segments + device-parameter
 overlay + template self-check done (`knxcfg memory`); module `BaseOffset`
-instantiation done (`Argument/@Allocates` parsed, `knxcfg memory` overlays
-module params at `base + Offset`); table builders done and ETS5-oracle-checked
-(`knx-prod::tables`, `docs/ets5-findings.md`): Association Table
-(`[TSAP][ASAP]`, confirmed) and Group Object Table (4 octets/GO
-`[word0][flags][00][vft]`). Remaining: GO-descriptor `word0`/DPT octets,
-GrAT header width, segment overlay, download, read-back, byte-identity vs ETS.
+instantiation done (`Argument/@Allocates` parsed); table builders done and
+ETS5-oracle-checked against a real download (`docs/ets5-findings.md`, ETS's
+`CommunicationTableFormatterSystem7`):
+- **GrAT** = `[len:1][IA:2][GA:2×N]` (big-endian, ascending)
+- **GrOAT** = `[len:1][TSAP:1][ASAP:1]×N`
+- **GoT** = 4 octets/GO `[data_pointer][flags][00][vft]`, no length prefix;
+  produced by *overlaying flags onto the knxprod template* (the data pointer
+  is baked into the template, not computed).
+- GO ASAP = `base + Number` (`BaseObj`/`ObjNumberBase`/`BaseNumber` args),
+  verified: Eingang A=0–5, B=6–11, Logic=12–23, "In Betrieb"=24.
+Remaining: wire the table builders into the download path (segment overlay +
+`A_Memory_Write`/load-control sequence), read-back, byte-identity vs ETS.
 Next: **M2** `.knxproj` import (clean-room RE) · **M3** `.knxproj` export ·
 **M4** USB cEMI transport (`09_03 §3`) · rest of **M5** (download + read-back,
 byte-identical to ETS as oracle) · **M6** hardening.
 
 ## Known loose ends
-- GO linking uses `object_number` only; the GO-descriptor `word0` octet (sparse
-  per-GO identifier, NOT the ASAP) and DPT-octet packing still need decode
+- GO linking uses `object_number` only; the `group_objects()` enumerator
+  returns *all* possible GOs, including mutually-exclusive channel modes
+  ("Inputs grouped" vs "Eingang A/B"), so the download builder must filter to
+  the active mode via `choose`/`when` visibility + parameter values
   (`docs/ets5-findings.md`).
 - knxprod path is stored absolute (machine-local); `--knxprod` override exists;
   vendoring into `vendor/` is a later option.
