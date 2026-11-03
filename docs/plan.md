@@ -270,6 +270,7 @@ Recorded (D1–D10):
 | D11 | Dependencies | **Debian-packaged crates only**, offline build via `.cargo/config.toml` (directory source `/usr/share/cargo/registry`) |
 | D12 | Project location | **Implicit** (walk up from cwd like git; `-C/--project` to override) |
 | D13 | Product data ref | **Record knxprod path per device** at `add` time (so `edit`/`download` don't need it again) |
+| D14 | Product store | **Project `vendor/` (default) + global `~/.local/share/knxcfg/knxprod`**, auto-resolved by h2p (`knxcfg import-product` → vendor/, `--global` → global) |
 
 Still open:
 

@@ -15,7 +15,10 @@ D4 USB cEMI tunnel transport · D5 ETS5 oracle · D6 knxprod ETS5 namespace ·
 D7 keep Buildings/Functions round-trip · D8 DPTs from knxprod · D9 3-level
 addressing · D10 full download · D11 Debian-packaged crates only (offline) ·
 D12 implicit project dir (walk up like git, `-C/--project` override) ·
-D13 record knxprod path per device at `add` time.
+D13 record knxprod path per device at `add` time ·
+D14 product store: project `vendor/` (default) + global
+`~/.local/share/knxcfg/knxprod`, auto-resolved by h2p
+(`import-product` copies into vendor/, `--global` into the global store).
 
 ## Spec / references
 - `refs/spec` (untracked, copyrighted). Cite as **`<doc> §X.Y Title`**, e.g.
@@ -51,25 +54,29 @@ D13 record knxprod path per device at `add` time.
   `ParameterBlock` `Text` template (`{{ChNo}}` = the instance's `ChNo`
   argument — text or numeric — e.g. "Logic 1..4").
 - `knx-transport` — stub only: `CemiFrame` encode/decode + `Transport` trait.
-- `knxcfg` — CLI (`main.rs`) + TUI (`tui.rs`, ratatui): panes shown as a
-  tab row; enums open a popup listing every value as `label (value)`.
+- `knxcfg` — CLI (`main.rs`, `product_store.rs`) + TUI (`tui.rs`, ratatui):
+  panes shown as a tab row; enums open a popup listing every value as
+  `label (value)`. `product_store` resolves an h2p to a knxprod file
+  (explicit `--knxprod` → recorded path → project `vendor/` → global store).
 
 ## Commands (dir implicit except `init`; `-C <dir>` to override)
 ```
 knxcfg init <dir>
 knxcfg list
+knxcfg import-product <file...> [--global]    # copy knxprod into vendor/ (default) or global store
+knxcfg catalog [<file>]                        # list store products (or one file)
 knxcfg group-add <ga> [--name N] [--dpt D]     group-rm <ga>
-knxcfg add <knxprod> <h2p> <ia> [--name N]     rm <ia>
+knxcfg add <h2p> <ia> [--name N] [--knxprod F] rm <ia>
 knxcfg link <ia> <object> <ga>                 unlink <ia> <object> <ga>
 knxcfg device-set <ia> <param-id> <value>
 knxcfg edit <ia> [--knxprod <file>]            # TUI: Tab=pages, Enter=edit, s=save, q=quit
-knxcfg catalog <knxprod> | probe <knxprod> <h2p> | form <knxprod> <h2p>
-knxcfg memory <knxprod> <h2p>                      # M5: segments, placements, template check
-knxcfg tables <knxprod> <h2p>                      # M5: group-object table (ASAP + flags + vft)
-knxcfg download <ia> [--knxprod <file>]            # M5 dry run: full image + plan + read-back self-check
+knxcfg probe <h2p> | form <h2p> | memory <h2p> | tables <h2p>   [--knxprod <file>]
+knxcfg download <ia> [--knxprod <file>]        # M5 dry run: full image + plan + read-back self-check
 ```
-`add` auto-creates Area/Line from the IA and records the canonical knxprod
-path in `DeviceRef.knxprod` (absolute — known portability tradeoff).
+knxprod files are resolved by h2p: `--knxprod` override → the path recorded at
+`add` time (D13) → project `vendor/` → global store
+(`$XDG_DATA_HOME/knxcfg/knxprod`, default `~/.local/share/knxcfg/knxprod`).
+`add` auto-creates Area/Line from the IA.
 
 ## Milestones
 Done: M0 skeleton · M1 knxprod parser · M1.5 form engine · M1.6 project
@@ -112,8 +119,9 @@ byte-identical to ETS as oracle) · **M6** hardening.
   active mode via `tables::active_group_objects` (choose/when visibility +
   parameter values); `tables::group_objects` still exists for enumerating
   *all* possible GOs (`docs/ets5-findings.md`).
-- knxprod path is stored absolute (machine-local); `--knxprod` override exists;
-  vendoring into `vendor/` is a later option.
+- knxprod resolution no longer needs a path per command: files are found by
+  h2p in the product store (global + project `vendor/`). The absolute path is
+  still recorded at `add` time as a fast path / fallback.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test

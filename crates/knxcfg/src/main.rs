@@ -8,6 +8,7 @@ use knx_core::{
 };
 use std::path::{Path, PathBuf};
 
+mod product_store;
 mod tui;
 
 #[derive(Parser)]
@@ -26,41 +27,60 @@ enum Cmd {
     Init { dir: PathBuf },
     /// Print the contents of the project (current dir or above)
     List,
-    /// List the products in a knxprod file
-    Catalog { file: PathBuf },
+    /// Copy knxprod files into the project's vendor/ store (or the global store)
+    ImportProduct {
+        /// One or more .knxprod files
+        #[arg(required = true)]
+        files: Vec<PathBuf>,
+        /// Copy into the global store instead of <project>/vendor/
+        #[arg(long)]
+        global: bool,
+    },
+    /// List products (whole product store, or a single knxprod file)
+    Catalog {
+        /// Optional knxprod file; omit to list the whole product store
+        file: Option<PathBuf>,
+    },
     /// Dump the parameters and group objects of an application program
     Probe {
-        file: PathBuf,
         /// Hardware2ProgramRefId (e.g. M-0083_H-180-0_HP-00B4-32-3919)
         h2p: String,
+        /// knxprod file override (auto-resolved from the product store)
+        #[arg(long)]
+        knxprod: Option<PathBuf>,
     },
     /// Print the dynamic parameter form (visibility resolved, defaults)
     Form {
-        file: PathBuf,
         /// Hardware2ProgramRefId
         h2p: String,
+        #[arg(long)]
+        knxprod: Option<PathBuf>,
     },
     /// Build the device memory image from the knxprod defaults (M5)
     Memory {
-        file: PathBuf,
         /// Hardware2ProgramRefId
         h2p: String,
+        #[arg(long)]
+        knxprod: Option<PathBuf>,
     },
     /// Build the group address / association / group object tables (M5)
     Tables {
-        file: PathBuf,
         /// Hardware2ProgramRefId
         h2p: String,
+        #[arg(long)]
+        knxprod: Option<PathBuf>,
     },
-    /// Add a device from a knxprod to the topology
+    /// Add a device from the product store to the topology
     Add {
-        knxprod: PathBuf,
         /// Hardware2ProgramRefId (from `knxcfg catalog`)
         h2p: String,
         /// Individual address, e.g. 1.1.1
         ia: String,
         #[arg(long)]
         name: Option<String>,
+        /// knxprod file override (auto-resolved from the product store)
+        #[arg(long)]
+        knxprod: Option<PathBuf>,
     },
     /// Remove a device from the topology
     Rm { ia: String },
@@ -121,14 +141,59 @@ fn main() -> Result<()> {
     match command {
         Cmd::Init { dir } => cmd_init(&dir),
         Cmd::List => cmd_list(&resolve_project(project.as_deref())?),
-        Cmd::Catalog { file } => cmd_catalog(&file),
-        Cmd::Probe { file, h2p } => cmd_probe(&file, &h2p),
-        Cmd::Form { file, h2p } => cmd_form(&file, &h2p),
-        Cmd::Memory { file, h2p } => cmd_memory(&file, &h2p),
-        Cmd::Tables { file, h2p } => cmd_tables(&file, &h2p),
-        Cmd::Add { knxprod, h2p, ia, name } => {
+        Cmd::ImportProduct { files, global } => {
+            let dest = if global {
+                product_store::global_store_dir()
+            } else {
+                let dir = resolve_project(project.as_deref())?;
+                product_store::vendor_dir(&dir)
+            };
+            product_store::import_files(&files, &dest)
+        }
+        Cmd::Catalog { file } => {
+            let project_dir = discover_project(project.as_deref());
+            cmd_catalog(file.as_deref(), project_dir.as_deref())
+        }
+        Cmd::Probe { h2p, knxprod } => {
+            let file = product_store::resolve(
+                &h2p,
+                discover_project(project.as_deref()).as_deref(),
+                None,
+                knxprod.as_deref(),
+            )?;
+            cmd_probe(&file, &h2p)
+        }
+        Cmd::Form { h2p, knxprod } => {
+            let file = product_store::resolve(
+                &h2p,
+                discover_project(project.as_deref()).as_deref(),
+                None,
+                knxprod.as_deref(),
+            )?;
+            cmd_form(&file, &h2p)
+        }
+        Cmd::Memory { h2p, knxprod } => {
+            let file = product_store::resolve(
+                &h2p,
+                discover_project(project.as_deref()).as_deref(),
+                None,
+                knxprod.as_deref(),
+            )?;
+            cmd_memory(&file, &h2p)
+        }
+        Cmd::Tables { h2p, knxprod } => {
+            let file = product_store::resolve(
+                &h2p,
+                discover_project(project.as_deref()).as_deref(),
+                None,
+                knxprod.as_deref(),
+            )?;
+            cmd_tables(&file, &h2p)
+        }
+        Cmd::Add { h2p, ia, name, knxprod } => {
             let dir = resolve_project(project.as_deref())?;
-            cmd_add(&dir, &knxprod, &h2p, &ia, name.as_deref())
+            let file = product_store::resolve(&h2p, Some(&dir), None, knxprod.as_deref())?;
+            cmd_add(&dir, &file, &h2p, &ia, name.as_deref())
         }
         Cmd::Rm { ia } => {
             let dir = resolve_project(project.as_deref())?;
@@ -183,6 +248,20 @@ fn resolve_project(flag: Option<&Path>) -> Result<PathBuf> {
         "not in a knxcfg project (no knx.yaml found in {} or any parent)",
         start.display()
     )
+}
+
+/// Like [`resolve_project`], but returns `None` instead of failing when there
+/// is no project. Used by inspection commands, which also search the global
+/// product store and therefore do not require a project.
+fn discover_project(flag: Option<&Path>) -> Option<PathBuf> {
+    if let Some(p) = flag {
+        return Some(p.to_path_buf());
+    }
+    let start = std::env::current_dir().ok()?;
+    start
+        .ancestors()
+        .find(|d| d.join("knx.yaml").is_file())
+        .map(PathBuf::from)
 }
 
 fn cmd_init(dir: &PathBuf) -> Result<()> {
@@ -240,15 +319,51 @@ fn cmd_list(dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn cmd_catalog(file: &PathBuf) -> Result<()> {
-    let knxprod = knx_prod::KnxProd::open(file)
-        .with_context(|| format!("reading {}", file.display()))?;
+fn cmd_catalog(file: Option<&Path>, project_dir: Option<&Path>) -> Result<()> {
+    if let Some(f) = file {
+        let knxprod = knx_prod::KnxProd::open(f)
+            .with_context(|| format!("reading {}", f.display()))?;
+        print_knxprod(f, &knxprod);
+        return Ok(());
+    }
+
+    let mut dirs: Vec<(&str, PathBuf)> = Vec::new();
+    if let Some(p) = project_dir {
+        dirs.push(("vendor", product_store::vendor_dir(p)));
+    }
+    dirs.push(("store", product_store::global_store_dir()));
+
+    let mut any = false;
+    for (label, dir) in dirs {
+        for f in product_store::knxprod_files(&dir)? {
+            any = true;
+            println!("[{label}] {}", f.display());
+            let knxprod = knx_prod::KnxProd::open(&f)
+                .with_context(|| format!("reading {}", f.display()))?;
+            print_knxprod(&f, &knxprod);
+            println!();
+        }
+    }
+    if !any {
+        println!(
+            "no knxprod files found; import one with `knxcfg import-product <file>`\nstore: {}",
+            product_store::global_store_dir().display()
+        );
+    }
+    Ok(())
+}
+
+fn print_knxprod(_file: &Path, knxprod: &knx_prod::KnxProd) {
     println!("Manufacturer: {}", knxprod.manufacturer_id);
     println!("{} product(s):", knxprod.products.len());
     for p in &knxprod.products {
-        println!("  {}  {}  [{}]", p.number, p.name, p.hardware2program_ref_id.as_deref().unwrap_or("?"));
+        println!(
+            "  {}  {}  [{}]",
+            p.number,
+            p.name,
+            p.hardware2program_ref_id.as_deref().unwrap_or("?")
+        );
     }
-    Ok(())
 }
 
 fn cmd_probe(file: &PathBuf, h2p: &str) -> Result<()> {
@@ -594,15 +709,12 @@ fn cmd_download(dir: &Path, ia_str: &str, knxprod_override: Option<&Path>) -> Re
         .find(|d| d.ia == ia)
         .ok_or_else(|| anyhow::anyhow!("device {ia} not found in topology"))?;
     let h2p = device_ref.hardware.clone();
-    let knxprod_path = match knxprod_override {
-        Some(p) => p.to_path_buf(),
-        None => PathBuf::from(
-            device_ref
-                .knxprod
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("device {ia} has no knxprod recorded; pass --knxprod <file>"))?,
-        ),
-    };
+    let knxprod_path = product_store::resolve(
+        &h2p,
+        Some(dir),
+        device_ref.knxprod.as_deref().map(Path::new),
+        knxprod_override,
+    )?;
 
     let kp = knx_prod::KnxProd::open(&knxprod_path)
         .with_context(|| format!("reading {}", knxprod_path.display()))?;
@@ -953,15 +1065,12 @@ fn cmd_edit(dir: &Path, ia_str: &str, knxprod_override: Option<&Path>) -> Result
         .ok_or_else(|| anyhow::anyhow!("device {ia} not found in topology"))?;
     let h2p = device_ref.hardware.clone();
 
-    let knxprod_path = match knxprod_override {
-        Some(p) => p.to_path_buf(),
-        None => PathBuf::from(
-            device_ref
-                .knxprod
-                .clone()
-                .ok_or_else(|| anyhow::anyhow!("device {ia} has no knxprod recorded; pass --knxprod <file>"))?,
-        ),
-    };
+    let knxprod_path = product_store::resolve(
+        &h2p,
+        Some(dir),
+        device_ref.knxprod.as_deref().map(Path::new),
+        knxprod_override,
+    )?;
 
     let kp = knx_prod::KnxProd::open(&knxprod_path)
         .with_context(|| format!("reading {}", knxprod_path.display()))?;
