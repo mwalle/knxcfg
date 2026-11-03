@@ -25,7 +25,7 @@
 //! The OS access to the HID device is behind [`HidDevice`]; on Linux it is
 //! [`crate::hidraw::Hidraw`].
 
-use super::{CemiFrame, Transport};
+use super::{message_code, CemiFrame, Transport};
 use anyhow::{anyhow, bail, Context, Result};
 use std::collections::VecDeque;
 use std::time::{Duration, Instant};
@@ -257,6 +257,16 @@ pub trait HidDevice {
 
 /// Timeout for a Device Feature Get (`09_03 §3.5.3.2.1`).
 const FEATURE_TIMEOUT: Duration = Duration::from_secs(1);
+/// Timeout for a local `M_PropWrite.con`: the KNX tunnelling timeout
+/// (`09_03 §3.4.2`).
+const LOCAL_TIMEOUT: Duration = Duration::from_secs(1);
+
+/// cEMI Server Object (`03_07_03`, interface object type 8) and its
+/// `PID_COMM_MODE` (`03_06_03 §4.2.2.4.2`).
+const OT_CEMI_SERVER: u16 = 8;
+const PID_COMM_MODE: u8 = 52;
+/// `DPT_CommMode` Data Link Layer (`03_06_03 Table 17`).
+const COMM_MODE_DATA_LINK_LAYER: u8 = 0x00;
 
 /// cEMI over a KNX USB Interface Device (`09_03 §3.4.2 KNX tunnelling`).
 pub struct UsbTransport<D: HidDevice> {
@@ -265,15 +275,25 @@ pub struct UsbTransport<D: HidDevice> {
     /// cEMI frames that arrived while waiting for a feature response.
     pending: VecDeque<CemiFrame>,
     bus_connected: Option<bool>,
+    /// Dump every HID report to stderr (`KNXCFG_TRACE` set).
+    trace: bool,
 }
 
 impl<D: HidDevice> UsbTransport<D> {
     /// Take over an opened device and select cEMI as described in
     /// `09_03 §3.5.3.3.2`: read the supported EMI types, refuse the device
     /// if cEMI is not among them, and set the active EMI type to cEMI when
-    /// the device supports more than one.
+    /// the device supports more than one. Then put the cEMI server into
+    /// Data Link Layer mode: its mode is undefined until the client sets
+    /// `PID_COMM_MODE` (`03_06_03 §4.2.2.4.2`).
     pub fn new(dev: D) -> Result<Self> {
-        let mut t = Self { dev, rx: Reassembler::default(), pending: VecDeque::new(), bus_connected: None };
+        let mut t = Self {
+            dev,
+            rx: Reassembler::default(),
+            pending: VecDeque::new(),
+            bus_connected: None,
+            trace: std::env::var_os("KNXCFG_TRACE").is_some(),
+        };
 
         let supported = t.feature_get(feature::SUPPORTED_EMI_TYPE).context("reading the supported EMI types")?;
         let supported = match supported[..] {
@@ -295,7 +315,41 @@ impl<D: HidDevice> UsbTransport<D> {
         }
         let status = t.feature_get(feature::BUS_CONNECTION_STATUS).context("reading the bus connection status")?;
         t.bus_connected = status.first().map(|b| b & 0x01 != 0);
+        t.set_comm_mode(COMM_MODE_DATA_LINK_LAYER).context("setting the cEMI communication mode")?;
         Ok(t)
+    }
+
+    /// `M_PropWrite.req` of `PID_COMM_MODE` in the cEMI Server Object
+    /// (`03_06_03 §4.1.7.3.4`). A negative `M_PropWrite.con` is accepted:
+    /// without the property the server only supports the Data Link Layer.
+    fn set_comm_mode(&mut self, mode: u8) -> Result<()> {
+        // MC, IOT:2, OI=1, PID, NoE=1 | SIx=1, data. Local management
+        // messages carry no additional info length.
+        let [iot_h, iot_l] = OT_CEMI_SERVER.to_be_bytes();
+        let req = [message_code::M_PROP_WRITE_REQ, iot_h, iot_l, 1, PID_COMM_MODE, 0x10, 0x01, mode];
+        let frame = TransferFrame {
+            protocol_id: protocol_id::KNX_TUNNEL,
+            id: emi_id::CEMI,
+            manufacturer: 0,
+            body: req.to_vec(),
+        };
+        self.write(&frame)?;
+        let deadline = Instant::now() + LOCAL_TIMEOUT;
+        loop {
+            let Some(frame) = self.read_frame(deadline)? else {
+                bail!("no M_PropWrite.con for PID_COMM_MODE within {LOCAL_TIMEOUT:?}");
+            };
+            match self.dispatch(frame) {
+                Some(f)
+                    if f.body.len() >= 7
+                        && f.body[0] == message_code::M_PROP_WRITE_CON
+                        && f.body[1..5] == req[1..5] =>
+                {
+                    return Ok(());
+                }
+                _ => {}
+            }
+        }
     }
 
     /// The last known bus connection status (`09_03 §3.5.3.4`), updated by
@@ -328,6 +382,9 @@ impl<D: HidDevice> UsbTransport<D> {
 
     fn write(&mut self, frame: &TransferFrame) -> Result<()> {
         for report in frame.encode_reports()? {
+            if self.trace {
+                eprintln!("usb tx {}", hex(&report[..3 + report[2] as usize]));
+            }
             self.dev.write_report(&report)?;
         }
         Ok(())
@@ -344,16 +401,27 @@ impl<D: HidDevice> UsbTransport<D> {
             let Some(report) = self.dev.read_report(left)? else {
                 return Ok(None);
             };
-            if let Ok(Some(frame)) = self.rx.push(&report) {
-                return Ok(Some(frame));
+            if self.trace {
+                let n = report.get(2).map_or(report.len(), |&l| (3 + l as usize).min(report.len()));
+                eprintln!("usb rx {}", hex(&report[..n]));
+            }
+            match self.rx.push(&report) {
+                Ok(Some(frame)) => return Ok(Some(frame)),
+                Ok(None) => {}
+                Err(e) if self.trace => eprintln!("usb rx ignored: {e}"),
+                Err(_) => {}
             }
         }
     }
 
     /// Queue tunnelled cEMI frames, track bus status infos, and hand back
-    /// any other Device Feature frame.
+    /// local management messages (`M_*`, no additional info) and any other
+    /// Device Feature frame.
     fn dispatch(&mut self, frame: TransferFrame) -> Option<TransferFrame> {
         match frame.protocol_id {
+            protocol_id::KNX_TUNNEL if frame.id == emi_id::CEMI && frame.body.first().is_some_and(|&mc| mc >= 0xF0) => {
+                Some(frame)
+            }
             protocol_id::KNX_TUNNEL if frame.id == emi_id::CEMI => {
                 if let Ok(cemi) = CemiFrame::decode(&frame.body) {
                     self.pending.push_back(cemi);
@@ -391,6 +459,10 @@ impl<D: HidDevice> Transport for UsbTransport<D> {
             self.dispatch(frame);
         }
     }
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" ")
 }
 
 #[cfg(test)]
@@ -472,11 +544,21 @@ mod tests {
         out: VecDeque<Vec<u8>>,
         sets: Vec<TransferFrame>,
         rx: Reassembler,
+        comm_mode: Option<u8>,
+        comm_mode_missing: bool,
     }
 
     impl MockHid {
         fn new(supported: u16, active: u8) -> Self {
-            Self { supported, active, out: VecDeque::new(), sets: vec![], rx: Reassembler::default() }
+            Self {
+                supported,
+                active,
+                out: VecDeque::new(),
+                sets: vec![],
+                rx: Reassembler::default(),
+                comm_mode: None,
+                comm_mode_missing: false,
+            }
         }
         fn queue(&mut self, frame: TransferFrame) {
             for r in frame.encode_reports().unwrap() {
@@ -504,6 +586,16 @@ mod tests {
                     }
                     self.sets.push(f);
                 }
+                (protocol_id::KNX_TUNNEL, emi_id::CEMI) if f.body[0] == message_code::M_PROP_WRITE_REQ => {
+                    self.comm_mode = Some(f.body[7]);
+                    let mut body = f.body[..7].to_vec();
+                    body[0] = message_code::M_PROP_WRITE_CON;
+                    if self.comm_mode_missing {
+                        body[5] &= 0x0F; // NoE = 0
+                        body.push(0x07); // error: void DP
+                    }
+                    self.queue(TransferFrame { body, ..f });
+                }
                 (protocol_id::KNX_TUNNEL, emi_id::CEMI) => {
                     let mut body = f.body.clone();
                     body[0] = message_code::L_DATA_CON;
@@ -525,6 +617,11 @@ mod tests {
         assert_eq!(t.dev.active, emi_id::CEMI);
         assert_eq!(t.dev.sets.len(), 1);
         assert_eq!(t.bus_connected(), Some(true));
+        assert_eq!(t.dev.comm_mode, Some(COMM_MODE_DATA_LINK_LAYER));
+        // Negative M_PropWrite.con: no PID_COMM_MODE, Data Link Layer only.
+        let mut dev = MockHid::new(supported_emi::CEMI, 0);
+        dev.comm_mode_missing = true;
+        assert!(UsbTransport::new(dev).is_ok());
         // cEMI-only device: no Active EMI type set.
         let t = UsbTransport::new(MockHid::new(supported_emi::CEMI, 0)).unwrap();
         assert!(t.dev.sets.is_empty());

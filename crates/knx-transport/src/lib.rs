@@ -28,6 +28,8 @@ pub mod message_code {
     pub const L_DATA_CON: u8 = 0x2E;
     pub const L_RAW_IND: u8 = 0x2D;
     pub const L_RAW_CON: u8 = 0x2F;
+    pub const M_PROP_WRITE_REQ: u8 = 0xF6;
+    pub const M_PROP_WRITE_CON: u8 = 0xF5;
     pub const M_RESET_REQ: u8 = 0xF1;
     pub const M_RESET_IND: u8 = 0xF0;
 }

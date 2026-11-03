@@ -69,7 +69,10 @@ D14 product store: project `vendor/` (default) + global
     5 reports, reassembly with the spec's error handling), Device Feature
     services (`09_03 §3.5.3`), `UsbTransport<D: HidDevice>`: on open it reads
     the supported EMI types, requires cEMI and sets it as active EMI type,
-    tracks the bus connection status (Get + Info frames).
+    tracks the bus connection status (Get + Info frames), then sets
+    `PID_COMM_MODE` = Data Link Layer with a local `M_PropWrite.req`
+    (`03_06_03 §4.2.2.4.2`: the mode is undefined until the client sets it).
+    `KNXCFG_TRACE=1` dumps every HID report to stderr.
   - `hidraw` (Linux) — `/dev/hidrawN` via `libc::poll`; enumeration from
     sysfs; KNX interfaces are recognised by their report descriptor
     (report ID 1, 63-octet input + output, vendor usage page), nothing is
