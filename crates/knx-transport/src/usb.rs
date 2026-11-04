@@ -319,6 +319,29 @@ impl<D: HidDevice> UsbTransport<D> {
         Ok(t)
     }
 
+    /// `M_Reset.req` (`03_06_03 §4.1.7.5`): restart the cEMI server, which
+    /// aborts and resets its bus and cEMI communication stacks. The
+    /// `M_Reset.ind` is waited for but not required (it is optional for USB
+    /// powered devices); the communication mode is set again afterwards.
+    pub fn reset(&mut self) -> Result<()> {
+        self.write(&TransferFrame {
+            protocol_id: protocol_id::KNX_TUNNEL,
+            id: emi_id::CEMI,
+            manufacturer: 0,
+            body: vec![message_code::M_RESET_REQ],
+        })?;
+        self.pending.clear();
+        let deadline = Instant::now() + LOCAL_TIMEOUT;
+        while let Some(frame) = self.read_frame(deadline)? {
+            if let Some(f) = self.dispatch(frame) {
+                if f.body.first() == Some(&message_code::M_RESET_IND) {
+                    break;
+                }
+            }
+        }
+        self.set_comm_mode(COMM_MODE_DATA_LINK_LAYER).context("setting the cEMI communication mode after M_Reset")
+    }
+
     /// `M_PropWrite.req` of `PID_COMM_MODE` in the cEMI Server Object
     /// (`03_06_03 §4.1.7.3.4`). A negative `M_PropWrite.con` is accepted:
     /// without the property the server only supports the Data Link Layer.
@@ -586,6 +609,10 @@ mod tests {
                     }
                     self.sets.push(f);
                 }
+                (protocol_id::KNX_TUNNEL, emi_id::CEMI) if f.body[0] == message_code::M_RESET_REQ => {
+                    self.comm_mode = None;
+                    self.queue(TransferFrame { body: vec![message_code::M_RESET_IND], ..f });
+                }
                 (protocol_id::KNX_TUNNEL, emi_id::CEMI) if f.body[0] == message_code::M_PROP_WRITE_REQ => {
                     self.comm_mode = Some(f.body[7]);
                     let mut body = f.body[..7].to_vec();
@@ -627,6 +654,13 @@ mod tests {
         assert!(t.dev.sets.is_empty());
         // No cEMI at all.
         assert!(UsbTransport::new(MockHid::new(supported_emi::EMI2, emi_id::EMI2)).is_err());
+    }
+
+    #[test]
+    fn reset_sets_the_comm_mode_again() {
+        let mut t = UsbTransport::new(MockHid::new(supported_emi::CEMI, 0)).unwrap();
+        t.reset().unwrap();
+        assert_eq!(t.dev.comm_mode, Some(COMM_MODE_DATA_LINK_LAYER));
     }
 
     #[test]
