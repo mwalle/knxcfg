@@ -1,0 +1,13 @@
+[package]
+name = "knx-proj"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+knx-core = { path = "../knx-core" }
+knx-prod = { path = "../knx-prod" }
+serde.workspace = true
+serde_yaml.workspace = true
+quick-xml = { workspace = true, features = ["serialize"] }
+zip.workspace = true
+anyhow.workspace = true

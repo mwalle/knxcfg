@@ -238,7 +238,8 @@ Ground rules:
    knxprod path at `add` time, shows localized labels, hides `Access="None"`
    params, and navigates pages with Tab/Shift-Tab.)*
 4. **M2 — ETS project import**: `.knxproj` → model → our format. Round-trip
-   stability (import twice = identical).
+   stability (import twice = identical). *(in progress — `knxcfg import`; see
+   `docs/STATUS.md` for what is left.)*
 5. **M3 — ETS project export**: our format → `.knxproj`, opens in ETS.
 6. **M4 — Transport**: USB cEMI tunnel (`09_03 §3 KNX USB Interface`), cEMI,
    management procedures. Able to read device descriptor + memory from a

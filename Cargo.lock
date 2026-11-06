@@ -537,6 +537,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "knx-proj"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "knx-core",
+ "knx-prod",
+ "quick-xml",
+ "serde",
+ "serde_yaml",
+ "zip",
+]
+
+[[package]]
 name = "knx-store"
 version = "0.1.0"
 dependencies = [
@@ -564,6 +577,7 @@ dependencies = [
  "knx-core",
  "knx-form",
  "knx-prod",
+ "knx-proj",
  "knx-store",
  "knx-transport",
  "ratatui",

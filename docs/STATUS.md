@@ -27,7 +27,10 @@ D14 product store: project `vendor/` (default) + global
   and services` · `03_05_02 Management Procedures` · `03_05_03 Configuration
   Procedures (S-Mode)` · `03_05_01 Resources` · `03_04_01 AIL` · `03_07_02 DPT`.
 - knxprod samples: `refs/knxprod/` (MDT binary inputs, MDT actuators, KLIC-MITT).
-- Observed knxprod/`.knxproj` facts: `docs/knxprod-format.md`, `docs/plan.md`.
+- `.knxproj` samples: `refs/knxproj/` (MDT projects from the Selfbus tests, and
+  `Haus.knxprojarchive`, the real installation: private, keep its contents out
+  of tracked files).
+- Observed facts: `docs/knxprod-format.md`, `docs/knxproj-format.md`, `docs/plan.md`.
 
 ## Workspace (crates/)
 - `knx-core` — typed model: `IndividualAddress` (reserved `x.y.0` /
@@ -87,6 +90,11 @@ D14 product store: project `vendor/` (default) + global
     `NM_IndividualAddress_Write` (`03_05_02 §2.3`: occupancy check, wait for
     exactly one device in programming mode, write, verify with DD0,
     `A_Restart`), `NM_IndividualAddress_SerialNumber_Read/Write` (§2.4/§2.5).
+- `knx-proj` — `.knxproj` import (M2, format in `docs/knxproj-format.md`):
+  `ProjectFile::open/convert/extract_product`. Parameters are keyed like
+  everywhere else, links use the ASAP; a parameter with different values on
+  several refs gets the value of the active ref. Every device is compared with
+  ETS's `IsActive` flags and its download image is built during the import.
 - `knxcfg` — CLI (`main.rs`, `product_store.rs`, `download.rs` plan → cEMI
   frames) + TUI (`tui.rs`; typed values are validated before they are taken).
 
@@ -102,6 +110,7 @@ knxcfg link <ia> <object> <ga> [--send]        unlink <ia> <object> <ga>
 knxcfg device-set <ia> <param> <value>         # validated; P-3 or MD-2_M-2/MD-2_P-26
 knxcfg edit <ia> [--knxprod <file>]            # TUI: Tab=pages, Enter=edit, s=save, q=quit
 knxcfg probe <h2p> | form <h2p> | memory <h2p> | tables <h2p>   [--knxprod <file>]
+knxcfg import <file.knxproj> [--force]         # into this project; unpacks missing product data to vendor/
 knxcfg download <ia> [--knxprod F] [--partial] [--frames]   # dry run: image, tables, plan
 knxcfg interfaces                              # hidraw devices, KNX USB interfaces marked
 knxcfg device-info <ia> [-i /dev/hidrawN]      # mask version (DD0) over the bus
@@ -139,9 +148,21 @@ the TP1 side of the interface (or the absence of a device at 1.1.1) is the
 open question, not the USB framing. Still to do: a working hardware run,
 `A_PropertyValue_Read/Write` responses,
 executing a download plan (incl. `LdCtrlWriteRelMem`).
-Next: finish **M4** with a hardware run, then live download/read-back ·
-**M2** `.knxproj` import (also the way to get ETS parameter images to compare
-against) · **M3** `.knxproj` export · **M6** hardening.
+**M2** (`.knxproj` import, in progress): topology, group addresses, parameters
+and links are imported, and re-importing gives byte-identical files. Checked on
+three real projects in `refs/knxproj`: two ETS 5.0 ones (all 78 group object refs
+agree with `IsActive`) and a real installation (ETS 5.7, 65 devices, modules): all
+parameter and object refs resolve, the 607 recorded module arguments match, and
+all 255 objects ETS shows to be active are active. On ETS 5.7 that check is
+one-way, see `docs/knxproj-format.md`. A project holds parameter values and
+visibility, not memory bytes, so comparing images still needs a capture of the
+ETS download of the same project.
+Still to do for M2: per-object flag/priority overrides (reported at import,
+not yet applied to the tables), confirming that the first `Links` entry is the
+sending address, and keeping the data listed under "Not imported" in
+`docs/knxproj-format.md`, which M3 needs (D7 Buildings/Functions).
+Next: finish **M2** · finish **M4** with a hardware run, then live
+download/read-back · **M3** `.knxproj` export · **M6** hardening.
 
 ## Known loose ends
 - Not supported (reported, not silent): KNX Data Secure (download only works
@@ -152,10 +173,15 @@ against) · **M3** `.knxproj` export · **M6** hardening.
   communication flag of unlinked System B objects, rounding of calculation
   results into integer parameters, the content of table segments behind the
   table end (the template residue is kept).
+- The memory encoder rejects `TypeText` parameters ("parameter type has no size")
+  and an IP address default of `0`, so MDT application `A-0133-10-9E94` (mask 07B0)
+  has no image. `MV-091A` is not a supported mask. Calculations using `switch`
+  (`A-018A-31-EEE8`, `MappingError`) are outside the JS subset.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
-`cargo build --offline` · `cargo test --offline` (87 tests, incl. the ETS5
-oracle regression test that reads `refs/knxprod`).
+`cargo build --offline` · `cargo test --offline` (98 tests, incl. the ETS5
+oracle regression test that reads `refs/knxprod` and the import of the ETS
+projects in `refs/knxproj`).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),
 zip, base64, clap, anyhow, thiserror, ratatui 0.28, crossterm 0.27.

@@ -95,13 +95,7 @@ pub fn resolve(
         }
     }
 
-    if let Some(dir) = project {
-        if let Some(p) = find_in_dir(&vendor_dir(dir), h2p)? {
-            return Ok(p);
-        }
-    }
-
-    if let Some(p) = find_in_dir(&global_store_dir(), h2p)? {
+    if let Some(p) = find(h2p, project)? {
         return Ok(p);
     }
 
@@ -109,6 +103,16 @@ pub fn resolve(
         "no knxprod provides {h2p}; import one with `knxcfg import-product <file>` \
          or pass --knxprod <file>"
     )
+}
+
+/// Search the project's `vendor/` directory, then the global store.
+pub fn find(h2p: &str, project: Option<&Path>) -> Result<Option<PathBuf>> {
+    if let Some(dir) = project {
+        if let Some(p) = find_in_dir(&vendor_dir(dir), h2p)? {
+            return Ok(Some(p));
+        }
+    }
+    find_in_dir(&global_store_dir(), h2p)
 }
 
 /// Sorted `.knxprod` files in a directory (empty if it does not exist).

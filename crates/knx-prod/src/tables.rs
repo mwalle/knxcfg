@@ -169,7 +169,7 @@ impl GroupObject {
 }
 
 /// knxprod `Priority` → transmission priority bits.
-fn priority_bits(p: &str) -> Option<u8> {
+pub fn priority_bits(p: &str) -> Option<u8> {
     match p {
         "Low" => Some(0b11),
         "High" => Some(0b01),
@@ -278,6 +278,18 @@ fn asap_of(ev: &Evaluation, scope: usize, co: &ComObject) -> u16 {
             .unwrap_or(0)
     };
     base + number
+}
+
+/// ASAP and resolved object of a `ComObjectRef` in a scope, whether or not it
+/// is active.
+pub fn resolve_com_object_ref(
+    ev: &Evaluation,
+    scope: usize,
+    com_ref: &ComObjectRef,
+) -> Option<(u16, GroupObject)> {
+    let co = scope_com_objects(ev.scopes[scope].static_).find(|c| c.id == com_ref.ref_id)?;
+    let merged = merged_com_object(co, com_ref);
+    Some((asap_of(ev, scope, &merged), GroupObject::of(&merged)))
 }
 
 /// Merge a `ComObjectRef`'s non-empty overrides onto its base `ComObject`.

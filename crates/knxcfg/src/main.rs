@@ -139,8 +139,14 @@ enum Cmd {
     },
     /// Export the project to an ETS .knxproj file (M3)
     Export,
-    /// Import an ETS .knxproj file (M2)
-    Import { file: PathBuf },
+    /// Import an ETS .knxproj file into this project (M2). Product data the
+    /// store does not have yet is unpacked from the file into vendor/
+    Import {
+        file: PathBuf,
+        /// Replace the contents of a project that is not empty
+        #[arg(long)]
+        force: bool,
+    },
     /// Build and (M4: send) the download image for a device (M5 dry run)
     Download {
         /// Individual address, e.g. 1.1.1
@@ -282,7 +288,9 @@ fn main() -> Result<()> {
             cmd_edit(&dir, &ia, knxprod.as_deref())
         }
         Cmd::Export => bail!("`export` is not implemented yet (M3)"),
-        Cmd::Import { .. } => bail!("`import` is not implemented yet (M2)"),
+        Cmd::Import { file, force } => {
+            cmd_import(&resolve_project(project.as_deref())?, &file, force)
+        }
         Cmd::Download { ia, knxprod, frames, partial } => {
             let dir = resolve_project(project.as_deref())?;
             cmd_download(&dir, &ia, knxprod.as_deref(), frames, partial)
@@ -340,6 +348,88 @@ fn cmd_init(dir: &PathBuf) -> Result<()> {
     let project = knx_core::Project::default();
     knx_store::save(dir, &project)?;
     println!("Created empty project in {}", dir.display());
+    Ok(())
+}
+
+fn cmd_import(dir: &Path, file: &Path, force: bool) -> Result<()> {
+    let existing = knx_store::load(dir)?;
+    if !force
+        && !(existing.topology.is_empty() && existing.groups.is_empty() && existing.devices.is_empty())
+    {
+        bail!(
+            "{} is not empty; use --force to replace its contents with the import",
+            dir.display()
+        );
+    }
+
+    let proj = knx_proj::ProjectFile::open(file)?;
+
+    // Unpack what the product store does not have before converting, so the
+    // recorded paths and later commands find the same files.
+    let vendor = product_store::vendor_dir(dir);
+    let mut extracted = std::collections::BTreeSet::new();
+    for h2p in proj.hardware_refs() {
+        if product_store::find(&h2p, Some(dir))?.is_some() {
+            continue;
+        }
+        let manufacturer = h2p.split('_').next().unwrap_or_default().to_string();
+        if !extracted.insert(manufacturer.clone()) {
+            continue;
+        }
+        std::fs::create_dir_all(&vendor)?;
+        let stem = file.file_stem().unwrap_or_default().to_string_lossy();
+        let dest = vendor.join(format!("{stem}-{manufacturer}.knxprod"));
+        proj.extract_product(&manufacturer, &dest)
+            .with_context(|| format!("no knxprod in the store provides {h2p}"))?;
+        println!("Unpacked product data to {}", dest.display());
+    }
+
+    let imported = proj.convert(|h2p| {
+        let path = product_store::resolve(h2p, Some(dir), None, None)?;
+        let kp = knx_prod::KnxProd::open(&path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let name = kp
+            .products
+            .iter()
+            .find(|p| p.hardware2program_ref_id.as_deref() == Some(h2p))
+            .map(|p| p.name.clone())
+            .unwrap_or_default();
+        Ok(knx_proj::ResolvedProduct {
+            application: kp.application_program(h2p).with_context(|| format!("resolving {h2p}"))?,
+            name,
+            knxprod: Some(product_store::record_path(dir, &path)),
+        })
+    })?;
+
+    knx_store::save(dir, &imported.project)?;
+
+    let links: usize = imported.project.devices.iter().map(|d| d.links.len()).sum();
+    println!(
+        "Imported \"{}\": {} device(s), {} group address(es), {links} link(s)",
+        imported.project.meta.name,
+        imported.project.devices.len(),
+        imported.project.groups.len(),
+    );
+    let objects: usize = imported.checks.iter().map(|c| c.compared_objects).sum();
+    let arguments: usize = imported.checks.iter().map(|c| c.compared_arguments).sum();
+    let differing = imported
+        .checks
+        .iter()
+        .filter(|c| !c.visibility_mismatches.is_empty() || !c.argument_mismatches.is_empty())
+        .count();
+    let unbuilt = imported.checks.iter().filter(|c| c.image_error.is_some()).count();
+    println!(
+        "Compared with ETS: {objects} group object(s), {arguments} module argument(s); \
+         {differing} device(s) differ"
+    );
+    if unbuilt > 0 {
+        println!("{unbuilt} device(s) have no download image, see the warnings");
+    }
+    print_warnings(&imported.warnings);
+    println!(
+        "Not imported: buildings and functions, group ranges, descriptions, serial numbers, \
+         group object texts and datapoint types"
+    );
     Ok(())
 }
 

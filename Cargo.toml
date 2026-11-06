@@ -4,6 +4,7 @@ members = [
     "crates/knx-core",
     "crates/knx-store",
     "crates/knx-prod",
+    "crates/knx-proj",
     "crates/knx-form",
     "crates/knx-transport",
     "crates/knxcfg",
