@@ -202,6 +202,7 @@ impl<'a> Evaluation<'a> {
 
         let mut forced: BTreeMap<String, String> = BTreeMap::new();
         let mut warnings = Vec::new();
+        let mut previous_refs = HashSet::new();
         for pass in 0..MAX_PASSES {
             ev.compute_values(&user, &forced);
             let walk = ev.walk();
@@ -221,7 +222,12 @@ impl<'a> Evaluation<'a> {
             for (k, v) in ev.run_calculations(&user, &mut warnings) {
                 next_forced.insert(k, v);
             }
-            if next_forced == forced {
+            // Defaults depend on which refs are active, so the active set has
+            // to settle as well: with the same forced values and active refs
+            // the next pass computes the same values and the same walk.
+            let settled = next_forced == forced && ev.active_refs == previous_refs;
+            previous_refs = ev.active_refs.clone();
+            if settled {
                 break;
             }
             if pass + 1 == MAX_PASSES {
@@ -829,6 +835,43 @@ mod tests {
         assert!(ev.is_ref_active(0, "R-2b"));
         assert_eq!(ev.value("P-2"), Some("9"));
         assert_eq!(ev.value("P-3"), Some("0"));
+    }
+
+    /// Before any ref is active, the default comes from the first ref with a
+    /// `@Value`, here the unused R-1b. Branches must not be left selected by
+    /// that value once R-1a turns out to be the active ref.
+    #[test]
+    fn branches_follow_the_default_of_the_active_ref() {
+        let ap = ApplicationProgram {
+            static_: Some(Static {
+                parameters: Some(crate::Parameters {
+                    nodes: vec![param("P-1", "1"), param("P-2", "0"), param("P-3", "0")],
+                }),
+                parameter_refs: Some(ParameterRefs {
+                    items: vec![
+                        pref("R-1a", "P-1", None),
+                        pref("R-1b", "P-1", Some("0")),
+                        pref("R-2", "P-2", None),
+                        pref("R-3", "P-3", None),
+                    ],
+                }),
+                ..Default::default()
+            }),
+            dynamic: Some(Dynamic {
+                nodes: vec![
+                    rr("R-1a"),
+                    UiNode::Choose(Choose {
+                        param_ref_id: "R-1a".into(),
+                        whens: vec![when("0", vec![rr("R-2")]), when("1", vec![rr("R-3")])],
+                    }),
+                ],
+            }),
+            ..Default::default()
+        };
+        let ev = Evaluation::new(&ap, &HashMap::new());
+        assert_eq!(ev.value("P-1"), Some("1"));
+        assert!(ev.is_ref_active(0, "R-3"));
+        assert!(!ev.is_ref_active(0, "R-2"));
     }
 
     #[test]
