@@ -130,15 +130,29 @@ the Claude desktop app does not run on 32-bit Windows). Two ways:
   (logs and dumps of it stay in the scratch directory or under `refs/`, which
   is gitignored).
 
+## VM network
+
+Set up 2026-11-09. The VM has a second NIC on a host-only tap device, no
+bridge; the first NIC (`-net user`, QEMU's NAT) stays for the internet and the
+shared folder (`Z:`).
+
+```
+host:   ip tuntap add dev tap-knx mode tap user mw
+        ip addr add 192.168.77.1/24 dev tap-knx
+        ip link set tap-knx up
+qemu:   -netdev tap,id=knx,ifname=tap-knx,script=no,downscript=no
+        -device virtio-net-pci,netdev=knx
+guest:  192.168.77.2/24, no gateway, no DNS
+```
+
+The emulator listens on `192.168.77.1:3671` and joins 224.0.23.12 on
+`tap-knx`. Checked: ARP, ping from the guest to the host, and a UDP round
+trip from a guest socket to the host's port 3671 and back. The guest does not
+answer pings (Windows firewall). Not yet checked: multicast search, and
+whether the Windows firewall lets replies through to ETS.
+
 ## Needed from the user
 
-- VM network that reaches the Linux host on UDP 3671. The VM currently uses
-  `-net user` (QEMU's own NAT): the host is `10.0.2.2` from the guest,
-  multicast search does not work, and the guest's address in the KNXnet/IP
-  HPAI (`10.0.2.15`) is not reachable from the host. With it, the interface
-  is added in ETS by IP address and the emulator answers to the UDP source
-  address (NAT mode) instead of the HPAI. A tap or bridged network avoids
-  both.
 - ETS is ETS5 (installed in the VM); to check whether it uses tunnelling v1.
 - The clicks in ETS, or starting the VM with the QMP socket described above.
 
