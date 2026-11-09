@@ -962,9 +962,6 @@ fn cmd_download(
     let decoded = knx_prod::read_back_device(&ev, &image)?;
     let mut diffs = 0usize;
     for (id, value) in &decoded.parameters {
-        if image.shadowed.contains(id) {
-            continue; // overwritten by an active alternative
-        }
         let expected = ev.value(id).unwrap_or_default();
         if !same_value(expected, value) {
             println!("  param {id}: evaluated {expected} != decoded {value}");

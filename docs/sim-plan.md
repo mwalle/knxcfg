@@ -91,7 +91,9 @@ can be built and tested against it while the USB path is blocked.
    ETS5 capture, so it is the first check: ETS downloads, the dump must
    contain the known table bytes, then compare the parameter image.
    **Done**, see "Step 2 results".
-3. Live download in `knxcfg` against the simulation; compare dumps.
+3. Live download in `knxcfg` against the simulation; compare dumps. The
+   download plan is fixed (see "Step 3 results"); the KNXnet/IP transport
+   and the live executor are next.
 4. Coupler (mask 091A, the IP router of the real project): filter table and
    procedure. ETS might want to configure an IP router over IP instead of
    through the bus; to be found out.
@@ -193,6 +195,30 @@ into a second simulated device. Diff of the two dumps:
 These are the inputs for step 3. Open question: all ETS logs of the "test"
 project show GO0's config octet as 4Bh (communication off) although GO0 is
 linked to GA-1, while `docs/ets5-findings.md` and `oracle.rs` state 4Fh.
+
+## Step 3 results (so far)
+
+The three differences of step 2 are fixed in `knx-prod`:
+
+- task segments carry the application's PEI type and id for every load state
+  machine;
+- a System 7 address or association table is allocated whole and written in
+  its used part (`WriteMem` steps after the allocation): the address table's
+  length octet and group addresses, skipping its first entry, and the
+  association table;
+- the parameter image writes only active parameters and parameters set by a
+  reached `Assign` or a calculation; everything else keeps the template. Writing
+  only active ones was not enough: `MD-2_P-26` ("send on falling edge after
+  reset") is hidden but set from `MD-2_P-1` by an `Assign`, and ETS writes it.
+
+Result: for the "knx-sim" project (default configuration) the dump of
+knxcfg's download, replayed into a simulated device, equals the dump of ETS's
+live download. For the "test" project (`test.knxproj`, with links and changed
+parameters) against the captured download only GO0's configuration octet
+differs: knxcfg 4Fh, ETS 4Bh. The export is 20 minutes older than that
+download, and its `ComObjectRef` (`MD-2_O-3-0_R-11`) enables the
+communication flag, so the flag was probably switched off in ETS in between.
+To be checked with a linked object in the "knx-sim" project.
 
 ## Operating ETS
 

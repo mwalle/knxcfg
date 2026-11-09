@@ -11,12 +11,15 @@
 //! - only the **active member** of a `<Union>` is written (see
 //!   [`Evaluation::union_member`]); its own `Offset`/`BitOffset` are relative
 //!   to the union's `<Memory>`.
-//! - mutually exclusive alternatives (e.g. the module instances of different
-//!   channel modes) may share memory. Every memory-backed parameter is
-//!   written, in increasing priority: parameters of inactive module
-//!   instances, then hidden parameters of active scopes, then active
-//!   parameters — so the active configuration always wins. Placements that
-//!   were overwritten are listed in [`MemoryImage::shadowed`].
+//! - only **active** parameters and parameters set by a reached `Assign` or a
+//!   calculation are written; everything else keeps the template. Mutually
+//!   exclusive alternatives (e.g. the module instances of different channel
+//!   modes) may share memory, and inactive module instances and other hidden
+//!   parameters are left alone. This is what ETS 5.7 does in its download of
+//!   a BE-02001.02 (knx-sim step 2, `docs/sim-plan.md`): every octet of the
+//!   parameter segment equals knxcfg's image built this way, including a
+//!   hidden parameter set by an `Assign` (`MD-2_P-26`). Two written
+//!   parameters sharing memory are an error.
 //!
 //! Values are taken from an [`Evaluation`], so `ParameterRef` defaults,
 //! `Assign`s and calculations are already applied. Every value is validated
@@ -40,9 +43,6 @@ use crate::{ApplicationProgram, Memory, ParamNode, Parameter, ParameterType, Sta
 pub struct MemoryImage {
     pub segments: Vec<SegmentImage>,
     pub placements: Vec<Placement>,
-    /// Keys whose bits were (partly) overwritten by a higher-priority
-    /// parameter sharing the same memory.
-    pub shadowed: std::collections::HashSet<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -120,9 +120,7 @@ pub fn build_parameter_image_eval(ev: &Evaluation) -> Result<MemoryImage> {
     let mut placements: Vec<Placement> = Vec::new();
     let mut errors = Vec::new();
     let mut owner: HashMap<(&str, usize), usize> = HashMap::new();
-    let mut shadowed = std::collections::HashSet::new();
-    let mut slots = memory_slots(ev);
-    slots.sort_by_key(|s| s.rank);
+    let slots = memory_slots(ev);
     for slot in &slots {
         let value = ev.value(&slot.key).unwrap_or(&slot.param.value).to_string();
         let encoded = match codec.encode(slot.param, &value, slot.width_hint) {
@@ -155,14 +153,10 @@ pub fn build_parameter_image_eval(ev: &Evaluation) -> Result<MemoryImage> {
         encoded.write(&mut segment.data, abs_bit, codec.little_endian);
         for bit in abs_bit..abs_bit + bit_len {
             if let Some(prev) = owner.insert((slot.segment.as_str(), bit), placements.len()) {
-                let prev: &Placement = &placements[prev];
-                if slot.rank == Rank::Active && ev.is_param_active(&prev.param_id) {
-                    errors.push(format!(
-                        "{} and {} are both active and share memory at {}+{}",
-                        prev.param_id, slot.key, slot.segment, bit / 8
-                    ));
-                }
-                shadowed.insert(prev.param_id.clone());
+                errors.push(format!(
+                    "{} and {} are both written and share memory at {}+{}",
+                    placements[prev].param_id, slot.key, slot.segment, bit / 8
+                ));
             }
         }
         placements.push(Placement {
@@ -179,14 +173,14 @@ pub fn build_parameter_image_eval(ev: &Evaluation) -> Result<MemoryImage> {
         bail!("invalid parameter values:\n  {}", errors.join("\n  "));
     }
 
-    Ok(MemoryImage { segments, placements, shadowed })
+    Ok(MemoryImage { segments, placements })
 }
 
 /// Compare the encoded default configuration against the shipped segment
 /// templates.
 ///
-/// The template is the manufacturer's default image; ETS overwrites every
-/// parameter position, so a difference is not necessarily an error (legacy
+/// The template is the manufacturer's default image; ETS overwrites the
+/// positions of the active parameters, so a difference is not necessarily an error (legacy
 /// templates are often stale, and `Assign`/calculations change values). The
 /// list is informational: it shows where the default download differs from
 /// the factory image.
@@ -210,9 +204,6 @@ pub fn check_template(ap: &ApplicationProgram) -> Result<Vec<String>> {
         let Some(seg) = image.segments.iter().find(|s| s.id == p.segment_id) else {
             continue;
         };
-        if image.shadowed.contains(&p.param_id) {
-            continue;
-        }
         if bits_differ(&seg.data, template, p.offset * 8 + p.bit_offset, p.bit_len) {
             out.push(format!(
                 "{} @ byte {}+{}b ({} bit) default {:?} differs from template",
@@ -246,9 +237,7 @@ pub fn decode_parameter_image(
         .collect();
 
     let mut values = HashMap::new();
-    let mut slots = memory_slots(ev);
-    slots.sort_by_key(|s| s.rank);
-    for slot in slots {
+    for slot in memory_slots(ev) {
         let Some(buf) = data.get(slot.segment.as_str()) else {
             continue;
         };
@@ -260,21 +249,9 @@ pub fn decode_parameter_image(
     Ok(values)
 }
 
-/// Write priority of a memory slot (later wins).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
-enum Rank {
-    /// A parameter of a module instance that is not reached.
-    InactiveScope,
-    /// A hidden parameter of an active scope.
-    Hidden,
-    /// A parameter with an active `ParameterRef`.
-    Active,
-}
-
 /// One memory location to write: a parameter (or the active union member)
 /// at an absolute offset within a segment.
 struct Slot<'a> {
-    rank: Rank,
     key: String,
     param: &'a Parameter,
     segment: String,
@@ -285,9 +262,8 @@ struct Slot<'a> {
     width_hint: Option<usize>,
 }
 
-/// Every memory-backed parameter of every scope (all module instances:
-/// memory allocation is static, so inactive instances are written with their
-/// effective values too).
+/// The memory-backed parameters of every scope that are written: active, or
+/// set by an `Assign` or a calculation.
 fn memory_slots<'a>(ev: &Evaluation<'a>) -> Vec<Slot<'a>> {
     let mut out = Vec::new();
     for (si, scope) in ev.scopes.iter().enumerate() {
@@ -307,8 +283,10 @@ fn memory_slots<'a>(ev: &Evaluation<'a>) -> Vec<Slot<'a>> {
                     let Some(mem) = &param.memory else { continue };
                     let Some(base) = base_of(mem) else { continue };
                     let key = scope.key(&param.id);
+                    if !ev.is_param_active(&key) && !ev.is_forced(&key) {
+                        continue;
+                    }
                     out.push(Slot {
-                        rank: rank(ev, si, &key),
                         key,
                         param,
                         segment: mem.code_segment.clone(),
@@ -323,8 +301,10 @@ fn memory_slots<'a>(ev: &Evaluation<'a>) -> Vec<Slot<'a>> {
                     let Some(member) = ev.union_member(si, union) else { continue };
                     let bit = num(&mem.bit_offset) + num(&member.bit_offset);
                     let key = scope.key(&member.id);
+                    if !ev.is_param_active(&key) && !ev.is_forced(&key) {
+                        continue;
+                    }
                     out.push(Slot {
-                        rank: rank(ev, si, &key),
                         key,
                         param: member,
                         segment: mem.code_segment.clone(),
@@ -337,16 +317,6 @@ fn memory_slots<'a>(ev: &Evaluation<'a>) -> Vec<Slot<'a>> {
         }
     }
     out
-}
-
-fn rank(ev: &Evaluation, scope: usize, key: &str) -> Rank {
-    if ev.is_param_active(key) {
-        Rank::Active
-    } else if ev.is_scope_active(scope) {
-        Rank::Hidden
-    } else {
-        Rank::InactiveScope
-    }
 }
 
 fn num(s: &str) -> usize {
@@ -748,8 +718,21 @@ mod tests {
     use super::*;
     use crate::{
         Argument, Arguments, Code, Dynamic, Enumeration, ModuleDef, ModuleDefs, ModuleInstance,
-        ParameterTypes, Parameters, Segment, TextArg, TypeNumber, TypeRestriction, UiNode, Union,
+        ParameterRef, ParameterRefRef, ParameterRefs, ParameterTypes, Parameters, Segment, TextArg,
+        TypeNumber, TypeRestriction, UiNode, Union,
     };
+
+    /// Make parameters active: a `ParameterRef` per id in `static_` and a
+    /// `ParameterRefRef` to it in `dynamic`.
+    fn activate(static_: &mut Static, dynamic: &mut Option<Dynamic>, ids: &[&str]) {
+        let refs = static_.parameter_refs.get_or_insert_with(ParameterRefs::default);
+        let dynamic = dynamic.get_or_insert_with(Dynamic::default);
+        for id in ids {
+            let ref_id = format!("{id}_R-1");
+            refs.items.push(ParameterRef { id: ref_id.clone(), ref_id: id.to_string(), ..Default::default() });
+            dynamic.nodes.push(UiNode::ParameterRefRef(ParameterRefRef { ref_id, ..Default::default() }));
+        }
+    }
 
     #[test]
     fn write_bits_is_msb_first_and_big_endian() {
@@ -816,8 +799,23 @@ mod tests {
         })
     }
 
+    /// An application with `params` in one 16-octet segment; all parameters
+    /// and the default member of each union are active.
     fn ap_with(params: Vec<ParamNode>, types: Vec<ParameterType>, le: bool) -> ApplicationProgram {
-        ApplicationProgram {
+        let ids: Vec<String> = params
+            .iter()
+            .flat_map(|n| match n {
+                ParamNode::Parameter(p) => vec![p.id.clone()],
+                ParamNode::Union(u) => u
+                    .parameters
+                    .iter()
+                    .filter(|p| p.default_union_parameter == "true")
+                    .map(|p| p.id.clone())
+                    .collect(),
+            })
+            .collect();
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let mut ap = ApplicationProgram {
             static_: Some(Static {
                 parameter_types: Some(ParameterTypes { items: types }),
                 parameters: Some(Parameters { nodes: params }),
@@ -835,7 +833,9 @@ mod tests {
                 ..Default::default()
             }),
             ..Default::default()
-        }
+        };
+        activate(ap.static_.as_mut().unwrap(), &mut ap.dynamic, &ids);
+        ap
     }
 
     #[test]
@@ -973,6 +973,8 @@ mod tests {
             }),
             ..Default::default()
         };
+        let mut module = module;
+        activate(module.static_.as_mut().unwrap(), &mut module.dynamic, &["MD-1_P-1"]);
         let instance = ModuleInstance {
             id: "MD-1_M-1".into(),
             ref_id: "MD-1".into(),
@@ -982,7 +984,7 @@ mod tests {
             })],
             ..Default::default()
         };
-        ApplicationProgram {
+        let mut ap = ApplicationProgram {
             static_: Some(Static {
                 parameter_types: Some(ParameterTypes {
                     items: vec![number_type("PT-1", "8", "", "")],
@@ -1011,7 +1013,53 @@ mod tests {
             }),
             module_defs: Some(ModuleDefs { items: vec![module] }),
             ..Default::default()
-        }
+        };
+        activate(ap.static_.as_mut().unwrap(), &mut ap.dynamic, &["P-1"]);
+        ap
+    }
+
+    #[test]
+    fn inactive_parameters_keep_the_template() {
+        let mut ap = ap_with(
+            vec![
+                ParamNode::Parameter(Parameter {
+                    id: "P-1".into(),
+                    parameter_type: "PT-8".into(),
+                    value: "5".into(),
+                    memory: mem("AS", "0", ""),
+                    ..Default::default()
+                }),
+                ParamNode::Parameter(Parameter {
+                    id: "P-2".into(),
+                    parameter_type: "PT-8".into(),
+                    value: "6".into(),
+                    memory: mem("AS", "1", ""),
+                    ..Default::default()
+                }),
+            ],
+            vec![number_type("PT-8", "8", "", "")],
+            false,
+        );
+        let st = ap.static_.as_mut().unwrap();
+        st.code.as_mut().unwrap().absolute[0].data = Some("qrs=".into()); // AA BB
+        // Only P-1 stays reachable.
+        ap.dynamic.as_mut().unwrap().nodes.retain(|n| !matches!(n, UiNode::ParameterRefRef(r) if r.ref_id == "P-2_R-1"));
+        let image = build_parameter_image(&ap, &HashMap::new()).unwrap();
+        assert_eq!(&image.segments[0].data[..2], &[0x05, 0xBB]);
+        assert_eq!(image.placements.len(), 1);
+        let ev = Evaluation::new(&ap, &HashMap::new());
+        let back = decode_parameter_image(&ev, &image.segments).unwrap();
+        assert_eq!(back.len(), 1);
+        assert_eq!(back["P-1"], "5");
+
+        // A reached Assign writes the hidden P-2.
+        ap.dynamic.as_mut().unwrap().nodes.push(UiNode::Assign(crate::dynamic::Assign {
+            target_param_ref_ref: "P-2_R-1".into(),
+            value: "9".into(),
+            source_param_ref_ref: String::new(),
+        }));
+        let image = build_parameter_image(&ap, &HashMap::new()).unwrap();
+        assert_eq!(&image.segments[0].data[..2], &[0x05, 0x09]);
     }
 
     #[test]

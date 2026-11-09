@@ -44,9 +44,6 @@ pub struct DeviceImage {
     pub group_object_table: TableImage,
     /// Couplers: the filter table (see [`tables::build_filter_table`]).
     pub filter_table: Option<TableImage>,
-    /// Parameters whose memory was overwritten by a higher-priority
-    /// alternative (see [`crate::memory`]).
-    pub shadowed: HashSet<String>,
     /// Non-fatal problems (dropped links, unsupported knxprod features, …).
     pub warnings: Vec<String>,
 }
@@ -196,7 +193,6 @@ pub fn build_device_image_eval(
         association_table,
         group_object_table,
         filter_table: None,
-        shadowed: image.shadowed,
         warnings,
     })
 }
@@ -230,7 +226,6 @@ pub fn build_coupler_image(ev: &Evaluation, filter: &BTreeSet<u16>) -> Result<De
             bytes: tables::build_filter_table(filter.iter().copied()),
             placement: None,
         }),
-        shadowed: image.shadowed,
         warnings,
     })
 }
@@ -505,6 +500,9 @@ pub fn download_plan(
         if !kind.applies(step.applies_to()) {
             continue;
         }
+        // Steps that follow the current one (the table writes after an
+        // allocation).
+        let mut then = Vec::new();
         // Pre-download verification right after the connection is up.
         if matches!(step, LoadStep::Connect) && out.is_empty() {
             out.push(DownloadStep::Connect);
@@ -596,16 +594,14 @@ pub fn download_plan(
                 }
                 DownloadStep::ClearFilterTable { object: Object::Type(OBJECT_TYPE_ROUTER) }
             }
-            LoadStep::TaskSegment(s) => {
-                let lsm_idx = b(&s.lsm_idx, "LsmIdx")?;
-                let table = matches!(lsm_idx, 1 | 2);
-                DownloadStep::TaskSegment {
-                    lsm_idx,
-                    address: n(&s.address, "Address")?,
-                    pei_type: if table { 0 } else { pei_type },
-                    app_id: if table { [0; 5] } else { app_id },
-                }
-            }
+            // ETS 5.7 sends the application's PEI type and id with every task
+            // segment, those of the tables included (knx-sim step 2).
+            LoadStep::TaskSegment(s) => DownloadStep::TaskSegment {
+                lsm_idx: b(&s.lsm_idx, "LsmIdx")?,
+                address: n(&s.address, "Address")?,
+                pei_type,
+                app_id,
+            },
             LoadStep::CompareProp(s) => DownloadStep::CompareProp {
                 obj_idx: b(&s.obj_idx, "ObjIdx")?,
                 prop_id: b(&s.prop_id, "PropId")?,
@@ -619,6 +615,11 @@ pub fn download_plan(
                 let mem_type = b(&s.mem_type, "MemType")?;
                 // RAM (2) and stack segments are allocated, not written.
                 let data = if mem_type == 2 || seg_type == 1 {
+                    Vec::new()
+                } else if let Some(writes) = table_writes(image, address) {
+                    // A System 7 table: allocate the whole segment, write the
+                    // table only.
+                    then = writes;
                     Vec::new()
                 } else {
                     let segment = image
@@ -731,8 +732,36 @@ pub fn download_plan(
                 i + 1
             ),
         });
+        out.extend(then);
     }
     Ok(out)
+}
+
+/// The writes of a System 7 address or association table whose segment
+/// starts at `address`, as ETS 5.7 does them (knx-sim step 2): only the used
+/// part, not the segment's template behind the table end. In the address
+/// table ETS writes the length octet and the group addresses and skips the
+/// first entry (offset 1–2, the device's own address in `AddressTable_Bcu1`).
+fn table_writes(image: &DeviceImage, address: u32) -> Option<Vec<DownloadStep>> {
+    if image.format != TableFormat::System7 {
+        return None;
+    }
+    let segment = image.segments.iter().find(|s| s.address.parse::<u32>().ok() == Some(address))?;
+    let placed = |t: &TableImage| {
+        let p = t.placement.as_ref()?;
+        (p.segment_id == segment.id).then(|| (address as usize + p.offset) as u16)
+    };
+    let write = |address: u16, data: &[u8]| DownloadStep::WriteMem { address, data: data.to_vec(), verify: false };
+    if let Some(start) = placed(&image.address_table) {
+        let t = &image.address_table.bytes;
+        let mut steps = vec![write(start, &t[..1])];
+        if t.len() > 3 {
+            steps.push(write(start + 3, &t[3..]));
+        }
+        return Some(steps);
+    }
+    let start = placed(&image.association_table)?;
+    Some(vec![write(start, &image.association_table.bytes)])
 }
 
 /// The bytes of device memory `[address, address + size)`, from the absolute
@@ -1009,6 +1038,48 @@ mod tests {
             }
         );
         assert!(download_plan(&Evaluation::new(&ap, &HashMap::new()), &image, None, DownloadKind::Partial).is_err());
+    }
+
+    /// The tables are allocated whole and written like ETS does: only the
+    /// used part, without the address table's first entry; their task
+    /// segments carry the application id (knx-sim step 2).
+    #[test]
+    fn system7_tables_are_written_like_ets() {
+        let mut ap = system7_ap();
+        let mut table_steps = Vec::new();
+        for (lsm, address) in [("1", "16384"), ("2", "16897")] {
+            table_steps.extend([
+                LoadStep::Load(LdCtrlLoad { lsm_idx: lsm.into(), ..Default::default() }),
+                LoadStep::AbsSegment(LdCtrlAbsSegment {
+                    lsm_idx: lsm.into(),
+                    seg_type: "0".into(),
+                    address: address.into(),
+                    size: "8".into(),
+                    access: "255".into(),
+                    mem_type: "3".into(),
+                    seg_flags: "128".into(),
+                }),
+                LoadStep::TaskSegment(LdCtrlTaskSegment { lsm_idx: lsm.into(), address: address.into() }),
+                LoadStep::LoadCompleted(LdCtrlLoadCompleted { lsm_idx: lsm.into(), ..Default::default() }),
+            ]);
+        }
+        let steps = &mut ap.static_.as_mut().unwrap().load_procedures.as_mut().unwrap().items[0].steps;
+        steps.splice(1..1, table_steps);
+        let image = build_device_image(&ap, TableFormat::System7, &HashMap::new(), &[Link::new(0, 0x000A)]).unwrap();
+        let plan = download_plan(&Evaluation::new(&ap, &HashMap::new()), &image, None, DownloadKind::Full).unwrap();
+        let write = |address: u16, data: &[u8]| DownloadStep::WriteMem { address, data: data.to_vec(), verify: false };
+        let app_id = [0x00, 0x83, 0x00, 0xB6, 0x32];
+        assert!(matches!(&plan[2], DownloadStep::AbsSegment { address: 16384, data, .. } if data.is_empty()));
+        assert_eq!(plan[3..6], [
+            write(0x4000, &[0x02]),
+            write(0x4003, &[0x00, 0x0A]),
+            DownloadStep::TaskSegment { lsm_idx: 1, address: 16384, pei_type: 1, app_id },
+        ]);
+        assert!(matches!(&plan[8], DownloadStep::AbsSegment { address: 16897, data, .. } if data.is_empty()));
+        assert_eq!(plan[9..11], [
+            write(0x4201, &[0x01, 0x01, 0x00]),
+            DownloadStep::TaskSegment { lsm_idx: 2, address: 16897, pei_type: 1, app_id },
+        ]);
     }
 
     #[test]

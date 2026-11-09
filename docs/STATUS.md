@@ -144,9 +144,13 @@ Done: M0 skeleton · M1 knxprod parser · M1.5 form engine · M1.6 project
 editing + TUI.
 **M5** (download builder): the parameter image, tables and plan are built
 for all five sample products (System 7 and System B). The System 7 tables are
-checked against the ETS5 oracle (`crates/knx-prod/tests/oracle.rs`); the
-parameter image and the System B tables are spec/knxprod-derived and not yet
-compared with an ETS download. The plan is encoded as cEMI frames
+checked against the ETS5 oracle (`crates/knx-prod/tests/oracle.rs`). For the
+BE-02001.02 the complete download (plan, tables, parameter image) gives the
+same device state as ETS's in knx-sim (`docs/sim-plan.md`, step 3): only
+active parameters and those set by an `Assign` or a calculation are written,
+the rest keeps the template; the System 7 tables are written in their used
+part only. The System B tables are spec/knxprod-derived and not yet compared
+with an ETS download. The plan is encoded as cEMI frames
 (`download --frames`) except `LdCtrlWriteRelMem`, which needs the device's
 `PID_TABLE_REFERENCE` at run time.
 **Couplers** (masks 0912h/091Ah, property based configuration): the image is the
@@ -188,12 +192,12 @@ Still to do for M2: per-object flag/priority overrides (reported at import,
 not yet applied to the tables), confirming that the first `Links` entry is the
 sending address, and keeping the data listed under "Not imported" in
 `docs/knxproj-format.md`, which M3 needs (D7 Buildings/Functions).
-**knx-sim** (`docs/sim-plan.md`, in progress): steps 1 and 2 done. ETS
-downloads into a simulated BE-02001.02; the dump compared with knxcfg's
-download of the same project shows three differences (task segments of LSM
-1/2, table segments written whole, 31 parameter octets where ETS keeps the
-template), see "Step 2 results". `tools/vm.py` operates ETS in the VM.
-Next: **knx-sim** step 3 (fix those, live download in knxcfg) · finish **M2** ·
+**knx-sim** (`docs/sim-plan.md`, in progress): steps 1 and 2 done, step 3
+started: knxcfg's download of the BE-02001.02 now gives the same dump as
+ETS's (default configuration, live ETS download; the captured download of a
+configured project differs only in GO0's communication flag, see the plan).
+`tools/vm.py` operates ETS in the VM.
+Next: **knx-sim** step 3 (KNXnet/IP transport and live download in knxcfg) · finish **M2** ·
 finish **M4** · **M3** `.knxproj` export · **M6** hardening.
 
 ## Known loose ends
@@ -205,9 +209,6 @@ finish **M4** · **M3** `.knxproj` export · **M6** hardening.
 - Unverified against ETS: System B table bytes, the partial download, the
   communication flag of unlinked System B objects, rounding of calculation
   results into integer parameters.
-- Differs from ETS (knx-sim step 2): ETS writes only the used part of the
-  System 7 tables, while knxcfg writes the template residue behind the table
-  end.
 - The memory encoder rejects `TypeText` parameters ("parameter type has no size")
   and an IP address default of `0`, so MDT application `A-0133-10-9E94` (mask 07B0)
   has no image. Couplers: see "Couplers" under Milestones. Calculations using `switch`
