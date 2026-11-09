@@ -32,6 +32,11 @@ GroupObject table at $4400: 19 07 00 07 1A 4F 00 07 22 DB 00 07 ... (26 × 4 oct
 - Layout per `03_05_01 §4.18.9.1` (mask 0701h/0705h, 16-bit pointers):
   `[count:1][RAM-flags table pointer:2]`, then one 4-octet descriptor per
   object in ASAP order: `[data pointer:2][config:1][type:1]`.
+- Note (2026-11-10): every ETS log of this download in `ETS5.log`/`log.txt`
+  shows `07 1A 4B` for GO0 (communication flag off), not `4F`, although GO0
+  is linked. A linked object with the knxprod's flags gets `4F` from ETS
+  (knx-sim, `docs/sim-plan.md` step 3), so the 4B is most likely a flag
+  changed in that project; `oracle.rs` keeps 4F.
 - The oracle bytes read as `19 | 07 00 | 07 1A 4F 00 | 07 22 DB 00 | …`:
   25 objects, RAM-flags table at `0x0700`, GO0 value at `0x071A` with config
   `4F`, type `00` (1 bit), GO1 value at `0x0722`, config `DB`, …

@@ -192,9 +192,10 @@ into a second simulated device. Diff of the two dumps:
   parameter. (The offsets agree with the capture because ETS, not the
   device, chose those bytes.)
 
-These are the inputs for step 3. Open question: all ETS logs of the "test"
-project show GO0's config octet as 4Bh (communication off) although GO0 is
-linked to GA-1, while `docs/ets5-findings.md` and `oracle.rs` state 4Fh.
+These are the inputs for step 3. All ETS logs of the "test" project show
+GO0's config octet as 4Bh (communication off) although GO0 is linked to
+GA-1, while `docs/ets5-findings.md` and `oracle.rs` state 4Fh; resolved in
+step 3 (project state, see there).
 
 ## Step 3 results (so far)
 
@@ -218,7 +219,10 @@ parameters) against the captured download only GO0's configuration octet
 differs: knxcfg 4Fh, ETS 4Bh. The export is 20 minutes older than that
 download, and its `ComObjectRef` (`MD-2_O-3-0_R-11`) enables the
 communication flag, so the flag was probably switched off in ETS in between.
-To be checked with a linked object in the "knx-sim" project.
+Checked with a linked object: in the "knx-sim" project GO0 linked to 0/0/10
+(knxprod flags), ETS writes 4Fh, like knxcfg, and the dumps of the two
+downloads are equal again (tables included: address table length at 4000h
+and 0/0/10 at 4003h, association table at 4201h).
 
 ## Operating ETS
 
