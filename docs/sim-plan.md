@@ -93,24 +93,32 @@ can be built and tested against it while the USB path is blocked.
 ## Operating ETS
 
 ETS has no known command-line way to start downloads, so someone has to click.
-Options, from simplest:
+The VM is a plain QEMU process on the Linux host (Windows 7, 32 bit, ETS5;
+the Claude desktop app does not run on 32-bit Windows). Two ways:
 
 - **The user clicks** in ETS, and the logs and dumps are read on the Linux
   side.
-- **Computer use in the VM**: install the Claude desktop app inside the Windows
-  VM, enable Settings -> This computer -> Computer use (not confirmed that the
-  Windows app offers it), approve ETS as a controlled app. That session clicks
-  in ETS. Slow and coarse: fine for "connect to the emulator, download device
-  X, export the project", poor for long parameter editing.
-- **Driving the VM session from the Linux Claude Code session**: the Linux
-  session can message Claude sessions on the same machine, and sessions on
-  other machines only when Remote Control is connected. Not tested with a
-  desktop app session inside the VM. To try: start the VM session, connect
-  Remote Control on the Linux side, and check the list of reachable sessions
-  there (ListAgents). The VM session is a separate Claude with its own context
-  and approvals, so instructions have to be complete.
-- Not recommended: scripting the ETS interface with Windows UI Automation over
-  SSH (brittle).
+- **The Linux Claude Code session clicks**, over QEMU's control socket (QMP),
+  with `tools/vm.py`. Nothing is installed in the guest. Tested 2026-11-09
+  on the desktop, the Run dialog and Notepad++, not yet in ETS.
+  - The VM has to be started with
+    `-qmp unix:$HOME/.win7.qmp,server=on,wait=off` (QMP cannot be added to
+    a running VM) and keeps `-usbdevice tablet`, so the mouse is positioned
+    absolutely.
+  - `vm.py shot` writes the screen as a PNG (`screendump`, 1600x900);
+    `vm.py click X Y`, `move`, `type TEXT` and `key COMBO` send input
+    (`input-send-event`, `send-key`). Coordinates are screen pixels.
+  - The guest uses the German keyboard layout. `type` translates characters
+    for it; `key` names physical keys, so Ctrl+Z is `key ctrl-y`.
+  - Each step is action, screenshot, check. Slow, fine for "connect to the
+    emulator, download device X, export the project", poor for long
+    parameter editing.
+  - Type only into a window that was opened for the purpose and is seen in
+    the last screenshot: the guest also has other windows open (Notepad++
+    with files on the shared folder) and pop-ups such as update dialogs
+    take the focus.
+- Not recommended: scripting the ETS interface with Windows UI Automation
+  (brittle).
 
 ## Rules
 
@@ -124,17 +132,22 @@ Options, from simplest:
 
 ## Needed from the user
 
-- VM network that reaches the Linux host on UDP 3671 (bridged or host-only).
-  Multicast search may not cross the VM network; then the interface is added
-  in ETS by IP address.
-- The ETS version (ETS 5 or 6; ETS 6 may expect tunnelling v2).
-- The clicks in ETS, or the computer-use setup described above.
+- VM network that reaches the Linux host on UDP 3671. The VM currently uses
+  `-net user` (QEMU's own NAT): the host is `10.0.2.2` from the guest,
+  multicast search does not work, and the guest's address in the KNXnet/IP
+  HPAI (`10.0.2.15`) is not reachable from the host. With it, the interface
+  is added in ETS by IP address and the emulator answers to the UDP source
+  address (NAT mode) instead of the HPAI. A tap or bridged network avoids
+  both.
+- ETS is ETS5 (installed in the VM); to check whether it uses tunnelling v1.
+- The clicks in ETS, or starting the VM with the QMP socket described above.
 
 ## Other ways to record ETS (for later)
 
 - With the USB interface passed from the Linux host into the VM, `usbmon` on
   the host sees every HID report ETS sends: a record of a real download
-  without changing ETS.
+  without changing ETS. The VM already passes the interface through with
+  `-device usb-host,...,pcap=/tmp/usb.pcap`, which records the same in QEMU.
 - An instrumented build of the own firmware (`knx-core`) on a module, which
   emulates an MDT product ETS knows (`apps/demo-switch`, `devices/binary-input`),
   logging every management write. This confirms the result on real TP1
