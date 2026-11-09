@@ -550,6 +550,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "knx-sim"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "knx-transport",
+]
+
+[[package]]
 name = "knx-store"
 version = "0.1.0"
 dependencies = [

@@ -92,6 +92,12 @@ D14 product store: project `vendor/` (default) + global
     `NM_IndividualAddress_Write` (`03_05_02 §2.3`: occupancy check, wait for
     exactly one device in programming mode, write, verify with DD0,
     `A_Restart`), `NM_IndividualAddress_SerialNumber_Read/Write` (§2.4/§2.5).
+- `knx-sim` — KNXnet/IP tunnelling server with simulated devices
+  (`docs/sim-plan.md`): `knxip` (frames, HPAI incl. route back, DIBs),
+  `server` (search, connections, tunnelling, device management, heartbeat,
+  repetitions), `bus` (`L_Data.con`, routing, frame log), `device` (TL
+  connection, DD0, memory, properties, descriptions). ETS 5.7.4 connects and
+  reads the device info of a simulated device.
 - `knx-proj` — `.knxproj` import (M2, format in `docs/knxproj-format.md`):
   `ProjectFile::open/convert/extract_product`. Parameters are keyed like
   everywhere else, links use the ASAP; a parameter with different values on
@@ -180,9 +186,10 @@ Still to do for M2: per-object flag/priority overrides (reported at import,
 not yet applied to the tables), confirming that the first `Links` entry is the
 sending address, and keeping the data listed under "Not imported" in
 `docs/knxproj-format.md`, which M3 needs (D7 Buildings/Functions).
-Next: **knx-sim** (`docs/sim-plan.md`): a KNXnet/IP interface with simulated
-devices, so ETS and `knxcfg` download into the same simulation and the device
-states are compared; it also unblocks the live download · finish **M2** ·
+**knx-sim** (`docs/sim-plan.md`, in progress): step 1 done (tunnelling
+server, bus, simulated device; ETS connects, reads device info and finds a
+device in programming mode). `tools/vm.py` operates ETS in the VM.
+Next: **knx-sim** step 2 (simulated BE-02001.02, ETS download, dump) · finish **M2** ·
 finish **M4** · **M3** `.knxproj` export · **M6** hardening.
 
 ## Known loose ends
@@ -202,7 +209,7 @@ finish **M4** · **M3** `.knxproj` export · **M6** hardening.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
-`cargo build --offline` · `cargo test --offline` (106 tests, incl. the ETS5
+`cargo build --offline` · `cargo test --offline` (118 tests, incl. the ETS5
 oracle regression test that reads `refs/knxprod` and the import of the ETS
 projects in `refs/knxproj`).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),

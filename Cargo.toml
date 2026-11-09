@@ -7,6 +7,7 @@ members = [
     "crates/knx-proj",
     "crates/knx-form",
     "crates/knx-transport",
+    "crates/knx-sim",
     "crates/knxcfg",
 ]
 

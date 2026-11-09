@@ -1,0 +1,9 @@
+[package]
+name = "knx-sim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+knx-transport = { path = "../knx-transport" }

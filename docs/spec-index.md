@@ -78,10 +78,37 @@ used (parameter blocks, memory layout, load procedure).
 
 Source: `03_07_02 Datapoint Types` — sections to be indexed as used.
 
-## KNXnet/IP (later transport)
+## KNXnet/IP (knx-sim)
 
-Source: `03_08_xx` — `03_08_04 Tunnelling`, `03_08_03 Management`,
-`03_08_02 Core`; index when we reach M4+ IP support.
+Source: `03_08_01 Overview`, `03_08_02 Core`, `03_08_03 Management`,
+`03_08_04 Tunnelling`
+
+- `03_08_01 §5.5` — error and status codes (CONNECT_RESPONSE,
+  CONNECTIONSTATE_RESPONSE, …)
+- `03_08_02 §5` — communication channels: connection header, sequence
+  counter, heartbeat (60 s requests, server closes after 120 s)
+- `03_08_02 §7.1` — frame header; `§7.4.1` core service types
+- `03_08_02 §7.5.4` — DIBs (device information, supported service families)
+- `03_08_02 §8.6.2` — HPAI, incl. "Route Back" (all zero: answer to the
+  datagram's source)
+- `03_08_02 §8.6.3` — discovery, control and data endpoints
+- `03_08_03 §4.2` — device management connection (CRI/CRD, cEMI property
+  services with object type and instance)
+- `03_08_04 §2.2.2` — tunnelling on the data link layer, tunnelling address,
+  source 0000h filled in by the server
+- `03_08_04 §2.6.1` — TUNNELLING_ACK, 1 s timeout, sequence rules
+- `03_08_04 §5.4` — service types, CRI (basic/extended), CRD, connection header
+- `03_06_03 §4.1.7.3` — cEMI `M_PropRead`/`M_PropWrite`, error codes
+  (`§4.1.7.3.7.2`, 07h Void DP)
+
+## Application Layer services
+
+Source: `03_03_07 Application Layer`
+
+- `03_03_07 §3.4.3.2` (Figures 46/47) — `A_PropertyValue_Read/Response`:
+  element count at start index 0, nr_of_elem 0 as error answer
+- `03_03_07 §3.4.3.4` (Figures 29/43) — `A_PropertyDescription_Read/Response`
+- `03_03_07 §3.5.2` — `A_ADC_Read/Response` (read_count 0 as error answer)
 
 ## NOT in these PDFs (note)
 

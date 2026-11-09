@@ -1,7 +1,11 @@
 # knx-sim: verifying downloads against ETS without real devices
 
-Status: planned, nothing implemented (2026-11-09). The work starts with step 1
-below.
+Status (2026-11-09): step 1 done, `crates/knx-sim`; tested with ETS 5.7.4. Next
+is step 2.
+
+Run it with
+`cargo run -p knx-sim -- --listen 192.168.77.1 --device 1.1.1:0705:0083 --log <file>`.
+Commands on stdin: `prog <ia> [on|off]`, `devices`, `quit`.
 
 ## Why
 
@@ -78,7 +82,7 @@ can be built and tested against it while the USB path is blocked.
 
 1. Tunnelling server and bus with frame log; ETS connects and finds a
    simulated device (ETS "Information" on a device: reads descriptor 0 and
-   properties).
+   properties). **Done**, see "Step 1 results".
 2. Simulated BE-02001.02 (mask 0705). Its tables are already known from the
    ETS5 capture, so it is the first check: ETS downloads, the dump must
    contain the known table bytes, then compare the parameter image.
@@ -89,6 +93,42 @@ can be built and tested against it while the USB path is blocked.
 5. System B device and the partial download.
 6. `Links` order: change one sending address in an ETS copy of the project,
    export, look at `@Links` (no emulator needed).
+
+## Step 1 results
+
+`knx-sim` serves search (multicast and unicast), description, one tunnelling
+connection (link layer, basic and extended CRI), one device management
+connection (`M_PropRead`/`M_PropWrite` on the interface's device object), the
+heartbeat and the data repetitions. The bus gives a positive `L_Data.con` if
+a device has the destination address, otherwise a negative one. A simulated
+device has a Transport Layer connection (one partner, sequence numbers,
+T_ACK/T_NAK, repetitions acknowledged again), DD0, memory (64 KiB of zeros),
+a device object with properties, `A_PropertyDescription_Read`,
+`A_Authorize_Request` (level 0 for every key), `A_ADC_Read` (error answer),
+and in programming mode `A_IndividualAddress_Read/Write`; serial number
+services always. No 6 s connection timeout and no repetition of unacknowledged
+responses yet.
+
+What ETS 5.7.4 does (log of the run on 2026-11-09):
+
+- Search: `SEARCH_REQUEST_EXTENDED` (020Bh) and `SEARCH_REQUEST` in parallel;
+  the simulation answers only the second, which is enough.
+- "Test" and every later bus access: DESCRIPTION, tunnelling connection,
+  then a device management connection, `M_PropRead` of the interface's
+  `PID_DEVICE_DESCRIPTOR` (83, answered 091Ah) and `PID_MAX_APDULENGTH`
+  (56, answered 15), then the management connection is closed. ETS shows
+  "Ok" for the interface.
+- Device info ("Geräteinfo") of 1.1.1 (mask 0705), connection-oriented:
+  DD0; `A_PropertyValue_Read` object 5 PID 1 (twice); device object PIDs 12
+  (manufacturer), 15 (order info), 11 (serial number), 78 (hardware type),
+  25 (version); `A_ADC_Read` channel 1 with 8 reads (bus voltage); memory
+  0060h (programming mode); object 3 PIDs 13 and 6, memory B6ECh; object 4
+  PIDs 13 and 6, memory B6EDh; memory B6EAh and B6EBh. Without an answer to
+  `A_ADC_Read` ETS disconnects after about 6 s and tries again.
+- The memory addresses B6EAh–B6EDh and objects 3/4 are the System 7 load
+  states and program versions: step 2 has to fill them for the BE-02001.02.
+- Programming mode: `A_IndividualAddress_Read` broadcasts about every 3 s;
+  the device in programming mode is listed.
 
 ## Operating ETS
 
