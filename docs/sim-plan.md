@@ -147,21 +147,26 @@ mirrored at the mask's memory mapped `…LoadStatus` addresses (B6EAh–B6EDh), 
 run state, and the effects of the segment controls: a data segment of a table
 sets `PID_TABLE_REFERENCE`, a task segment of the application sets
 `PID_PROGRAM_VERSION` (the application id). No `PID_DEVICE_CONTROL`, like the
-real device. The dump lists the objects with load state, load controls of the
+device in the capture below. The dump lists the objects with load state, load controls of the
 current load and properties, and every memory octet a client wrote.
 
-**Replay of a real download.** `ETS5.log` of 2026-11-03 holds ETS's download of
-the real BE-02001.02 at 1.1.3 with the device's answers (raw cEMI). The frames
-are extracted to `refs/ets5/be-02001-download.txt` (untracked; it contains the
-device's serial number). `tests/ets5_replay.rs` sends ETS's 81 requests to the
-simulated device and compares all 79 frames it sends with the real device's:
-equal, except the serial number (not compared) and the maximum APDU length
-(real device: 254, set in the test; not in the knxprod).
+**Replay of a captured download.** `ETS5.log` of 2026-11-03 holds ETS's
+download of a BE-02001.02 at 1.1.3 with the device's answers (raw cEMI). That
+device was probably not MDT hardware but knx-core's emulation
+(`devices/binary-input`: same application, hardware type `00 00 00 00 02 AC`,
+max APDU length 254 from `libknx`; serial number not starting with 0083h).
+So the capture is a reference for what ETS sends, not for how the original
+device answers. The frames are extracted to `refs/ets5/be-02001-download.txt`
+(untracked; it contains the serial number). `tests/ets5_replay.rs` sends ETS's
+81 requests to the simulated device and compares all 79 frames it sends with
+the captured device's: equal, except the serial number (not compared) and the
+maximum APDU length (254, set in the test). This shows that knx-sim and the
+knx-core emulation agree, not that either matches MDT hardware.
 
 **Live ETS download.** ETS project "knx-sim" (new, only for the simulation):
 BE-02001.02 at 1.1.1, default parameters, no group addresses. "Programmieren →
 Applikationsprogramm" into the simulation: completed, all state columns green.
-Same sequence as with the real device; memory writes in 12-octet chunks (the
+Same sequence as in the capture; memory writes in 12-octet chunks (the
 interface's 15), and each write is read back. The empty tables are written as
 their length octet only (01h at 4000h, 00h at 4201h).
 
@@ -180,9 +185,10 @@ into a second simulated device. Diff of the two dumps:
   it; to be checked);
 - parameter segment 4468h–450Fh: 31 octets differ, and at every one ETS wrote
   the knxprod template byte of `AS-4468`. The same 31 offsets differ in the
-  replay of the real download. Likely knxcfg writes values (defaults) of
+  replay of the captured download. Likely knxcfg writes values (defaults) of
   inactive parameters where ETS keeps the template; to be confirmed per
-  parameter.
+  parameter. (The offsets agree with the capture because ETS, not the
+  device, chose those bytes.)
 
 These are the inputs for step 3. Open question: all ETS logs of the "test"
 project show GO0's config octet as 4Bh (communication off) although GO0 is

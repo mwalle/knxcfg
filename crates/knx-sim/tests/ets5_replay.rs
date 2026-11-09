@@ -1,7 +1,9 @@
-//! Replays ETS 5.7's download of a real BE-02001.02 (frames from ETS5.log,
+//! Replays ETS 5.7's download of a BE-02001.02 (frames from ETS5.log,
 //! `refs/ets5/be-02001-download.txt`, see `docs/sim-plan.md`) against the
 //! simulated device and compares every frame the simulation sends with the
-//! real device's.
+//! captured device's. The captured device is probably knx-core's emulation
+//! (`devices/binary-input`), not MDT hardware: the test checks that the two
+//! implementations agree, not that either matches the original.
 
 use knx_sim::device::{pid, Device};
 use knx_transport::cemi::LData;
@@ -34,7 +36,7 @@ fn replay_ets5_download() {
         return;
     };
     let mut dev: Device = knx_sim::profile::device(&knxprod, H2P, 0x1103).unwrap();
-    // The real device's maximum APDU length (not in the knxprod).
+    // The captured device's maximum APDU length (not in the knxprod).
     dev.set_property(0, pid::MAX_APDULENGTH, &[0x00, 0xFE]);
 
     let text = std::fs::read_to_string(capture).unwrap();

@@ -206,9 +206,10 @@ impl Device {
     /// A device with a device object (index 0) holding the properties ETS
     /// reads to identify a device; memory is 64 KiB of zeros.
     pub fn new(address: u16, mask: u16, manufacturer: u16, serial: [u8; 6]) -> Self {
-        // No PID_DEVICE_CONTROL: the BE-02001.02 has none (ETS5.log of a
-        // download, 2026-11-03), and without it ETS checks memory writes by
-        // reading them back.
+        // No PID_DEVICE_CONTROL, like the device in the download of
+        // ETS5.log (2026-11-03; probably knx-core's emulation of the
+        // BE-02001.02, not MDT hardware). Without it ETS checks memory
+        // writes by reading them back.
         let mut device_object = Object::new(0);
         device_object.properties.extend([
             Property::new(pid::SERIAL_NUMBER, pdt::GENERIC_06, 6, &serial),

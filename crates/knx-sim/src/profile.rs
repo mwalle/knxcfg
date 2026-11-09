@@ -53,7 +53,9 @@ pub fn device(knxprod: &Path, h2p: &str, address: u16) -> Result<Device> {
 
     // The hardware type the load procedure checks (`LdCtrlCompareProp` on
     // PID_HARDWARE_TYPE). The BE-02001.02's procedure has 10 octets of
-    // inline data; the device answers the first six (ETS5.log, 2026-11-03).
+    // inline data for the 6-octet property; the first six are taken, as in
+    // knx-core's emulation of the device. What MDT hardware answers is not
+    // known.
     let steps = ap.static_.iter().flat_map(|s| s.load_procedures.iter()).flat_map(|l| l.items.iter()).flat_map(|p| p.steps.iter());
     for step in steps {
         if let LoadStep::CompareProp(c) = step {
