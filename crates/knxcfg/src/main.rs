@@ -857,7 +857,12 @@ fn cmd_download(
         );
     }
     let format = device.knxprod.table_format(ap)?;
-    let image = knx_prod::device_image::build_device_image_eval(&ev, format, &links)?;
+    let image = if format == knx_prod::tables::TableFormat::Coupler {
+        let filter = project.coupler_filter(ia).iter().map(|ga| ga.to_u16()).collect();
+        knx_prod::build_coupler_image(&ev, &filter)?
+    } else {
+        knx_prod::device_image::build_device_image_eval(&ev, format, &links)?
+    };
 
     println!("Download image for {ia} ({})", device.device_ref.name);
     print_warnings(&image.warnings);
@@ -875,19 +880,30 @@ fn cmd_download(
     println!("\nActive group objects: {}", image.active_group_objects.len());
     print_group_objects(&image.active_group_objects);
 
-    println!("\nTables ({:?}):", image.format);
-    for (name, t) in [
-        ("Group Address Table", &image.address_table),
-        ("Association Table", &image.association_table),
-        ("Group Object Table", &image.group_object_table),
-    ] {
-        let at = t
-            .placement
-            .as_ref()
-            .map(|p| format!(" at {}+{}", p.segment_id, p.offset))
-            .unwrap_or_default();
-        println!("\n{name} ({} bytes{at}):", t.bytes.len());
-        hex_dump(&t.bytes);
+    if let Some(filter) = &image.filter_table {
+        let gas = knx_prod::tables::read_filter_table(&filter.bytes);
+        println!("\nFilter table ({} bytes, {} group addresses passed):", filter.bytes.len(), gas.len());
+        for chunk in gas.chunks(8) {
+            let list: Vec<String> =
+                chunk.iter().map(|&ga| knx_core::GroupAddress::from_u16(ga).to_string()).collect();
+            println!("  {}", list.join("  "));
+        }
+    }
+    if image.format != knx_prod::tables::TableFormat::Coupler {
+        println!("\nTables ({:?}):", image.format);
+        for (name, t) in [
+            ("Group Address Table", &image.address_table),
+            ("Association Table", &image.association_table),
+            ("Group Object Table", &image.group_object_table),
+        ] {
+            let at = t
+                .placement
+                .as_ref()
+                .map(|p| format!(" at {}+{}", p.segment_id, p.offset))
+                .unwrap_or_default();
+            println!("\n{name} ({} bytes{at}):", t.bytes.len());
+            hex_dump(&t.bytes);
+        }
     }
 
     let kind = if partial {
@@ -1417,6 +1433,10 @@ fn print_group_objects(objects: &[(u16, knx_prod::tables::GroupObject)]) {
 fn describe_step(step: &knx_prod::DownloadStep) -> String {
     use knx_prod::DownloadStep as S;
     let hex = |d: &[u8]| d.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let lsm = |o: &knx_prod::Object| match o {
+        knx_prod::Object::Index(i) => format!("LsmIdx={i}"),
+        other => other.to_string(),
+    };
     match step {
         S::Connect => "Connect".into(),
         S::Disconnect => "Disconnect".into(),
@@ -1424,9 +1444,9 @@ fn describe_step(step: &knx_prod::DownloadStep) -> String {
         S::CompareProp { obj_idx, prop_id, inline_data } => {
             format!("CompareProp ObjIdx={obj_idx} PropId={prop_id} Data={}", hex(inline_data))
         }
-        S::Unload { lsm_idx } => format!("Unload LsmIdx={lsm_idx}"),
-        S::Load { lsm_idx } => format!("Load LsmIdx={lsm_idx}"),
-        S::LoadCompleted { lsm_idx } => format!("LoadCompleted LsmIdx={lsm_idx}"),
+        S::Unload { object } => format!("Unload {}", lsm(object)),
+        S::Load { object } => format!("Load {}", lsm(object)),
+        S::LoadCompleted { object } => format!("LoadCompleted {}", lsm(object)),
         S::AbsSegment { lsm_idx, seg_type, address, size, access, mem_type, seg_flags, data } => format!(
             "AbsSegment LsmIdx={lsm_idx} SegType={seg_type} Address=0x{address:04x} Size={size} \
              Access={access} MemType={mem_type} SegFlags={seg_flags} ({})",
@@ -1443,9 +1463,18 @@ fn describe_step(step: &knx_prod::DownloadStep) -> String {
             "WriteRelMem ObjIdx={obj_idx} Offset={offset} Size={} Verify={verify}",
             data.len()
         ),
-        S::WriteProp { obj_idx, prop_id, data, verify } => {
-            format!("WriteProp ObjIdx={obj_idx} PropId={prop_id} Data={} Verify={verify}", hex(data))
+        S::WriteProp { object, prop_id, data, verify } => {
+            format!("WriteProp {object} PropId={prop_id} Data={} Verify={verify}", hex(data))
         }
+        S::WriteMem { address, data, verify } => {
+            format!("WriteMem Address=0x{address:04x} Size={} Verify={verify}", data.len())
+        }
+        S::WriteFilterTable { address, data, verify } => format!(
+            "WriteFilterTable Address=0x{address:04x} Size={} Verify={verify} ({} group addresses passed)",
+            data.len(),
+            data.iter().map(|b| b.count_ones()).sum::<u32>()
+        ),
+        S::ClearFilterTable { object } => format!("ClearFilterTable {object}"),
         S::ReadProp { obj_idx, prop_id } => format!("ReadProp ObjIdx={obj_idx} PropId={prop_id}"),
         S::Delay { ms } => format!("Delay {ms} ms"),
         S::MapError { original, mapped } => format!("MapError {original} -> {mapped}"),

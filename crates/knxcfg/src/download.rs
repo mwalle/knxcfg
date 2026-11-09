@@ -8,12 +8,12 @@
 //! the orchestrator — see `docs/plan.md` §4.
 //!
 //! The result is the request side of the conversation only. Steps whose
-//! frames depend on a device response (`LdCtrlWriteRelMem` needs the
-//! object's `PID_TABLE_REFERENCE` first) cannot be pre-encoded and are
-//! reported as errors.
+//! frames depend on a device response cannot be pre-encoded and are reported
+//! as errors: `LdCtrlWriteRelMem` needs the object's `PID_TABLE_REFERENCE`,
+//! and steps that name an interface object by type (couplers) need its index.
 
 use anyhow::{bail, Result};
-use knx_prod::DownloadStep;
+use knx_prod::{DownloadStep, Object};
 use knx_transport::apdu::{self, apci};
 use knx_transport::cemi::{self, tpci};
 use knx_transport::CemiFrame;
@@ -21,6 +21,10 @@ use knx_transport::CemiFrame;
 /// Data octets per `A_Memory_Write` in a standard frame: 15 TPDU octets
 /// after the TPCI octet, minus APCI and address (`03_03_07 §3.5.4`).
 const MEMORY_WRITE_CHUNK: usize = 12;
+
+/// Data octets per `A_FilterTable_Write` in a standard frame: one octet less
+/// than `A_Memory_Write`, for the separate count (`03_05_02 §3.41.2`: 11).
+const FILTER_TABLE_WRITE_CHUNK: usize = 11;
 
 /// `PID_LOAD_STATE_CONTROL` writes carry one 10-octet `PDT_CONTROL` element
 /// (`03_05_02 §3.31.3`).
@@ -40,6 +44,17 @@ pub fn plan_to_frames(plan: &[DownloadStep], dst: u16) -> Result<Vec<CemiFrame>>
     };
 
     for (i, step) in plan.iter().enumerate() {
+        let index = |object: &Object| -> Result<u8> {
+            match object {
+                Object::Index(idx) => Ok(*idx),
+                Object::Type(t) => bail!(
+                    "step {}: the load procedure names the interface object by type ({t}); its \
+                     index is read from the device, so this can only be encoded during a live \
+                     download",
+                    i + 1
+                ),
+            }
+        };
         match step {
             DownloadStep::Connect => {
                 frames.push(cemi::l_data_control(tpci::T_CONNECT, 0, dst));
@@ -57,13 +72,51 @@ pub fn plan_to_frames(plan: &[DownloadStep], dst: u16) -> Result<Vec<CemiFrame>>
             DownloadStep::ReadProp { obj_idx, prop_id } => {
                 data(&mut frames, &apdu::property_value_read(*obj_idx, *prop_id, 1, 1));
             }
-            DownloadStep::WriteProp { obj_idx, prop_id, data: d, .. } => {
-                data(&mut frames, &apdu::property_value_write(*obj_idx, *prop_id, 1, 1, d));
+            DownloadStep::WriteProp { object, prop_id, data: d, .. } => {
+                let idx = index(object)?;
+                data(&mut frames, &apdu::property_value_write(idx, *prop_id, 1, 1, d));
             }
-            DownloadStep::Unload { lsm_idx } => data(&mut frames, &load_event(*lsm_idx, &[0x04])),
-            DownloadStep::Load { lsm_idx } => data(&mut frames, &load_event(*lsm_idx, &[0x01])),
-            DownloadStep::LoadCompleted { lsm_idx } => {
-                data(&mut frames, &load_event(*lsm_idx, &[0x02]))
+            DownloadStep::Unload { object } => {
+                let idx = index(object)?;
+                data(&mut frames, &load_event(idx, &[0x04]))
+            }
+            DownloadStep::Load { object } => {
+                let idx = index(object)?;
+                data(&mut frames, &load_event(idx, &[0x01]))
+            }
+            DownloadStep::LoadCompleted { object } => {
+                let idx = index(object)?;
+                data(&mut frames, &load_event(idx, &[0x02]))
+            }
+            DownloadStep::WriteMem { address, data: bytes, .. } => {
+                if *address as usize + bytes.len() > 0x1_0000 {
+                    bail!("step {}: write at {address:#x} goes above 64 KiB", i + 1);
+                }
+                for (n, chunk) in bytes.chunks(MEMORY_WRITE_CHUNK).enumerate() {
+                    let offset = *address as usize + n * MEMORY_WRITE_CHUNK;
+                    data(&mut frames, &apdu::memory_write(offset as u16, chunk));
+                }
+            }
+            DownloadStep::WriteFilterTable { address, data: bytes, .. } => {
+                if *address as usize + bytes.len() > 0x1_0000 {
+                    bail!("step {}: filter table at {address:#x} goes above 64 KiB", i + 1);
+                }
+                data(&mut frames, &apdu::filter_table_open());
+                for (n, chunk) in bytes.chunks(FILTER_TABLE_WRITE_CHUNK).enumerate() {
+                    let offset = *address as usize + n * FILTER_TABLE_WRITE_CHUNK;
+                    data(&mut frames, &apdu::filter_table_write(offset as u16, chunk));
+                }
+            }
+            DownloadStep::ClearFilterTable { object } => {
+                let idx = index(object)?;
+                data(
+                    &mut frames,
+                    &apdu::function_property_command(
+                        idx,
+                        apci::PID_ROUTETABLE_CONTROL,
+                        &[0x00, apci::SRVID_CLEAR_FILTERTABLE],
+                    ),
+                );
             }
             DownloadStep::AbsSegment {
                 lsm_idx,
@@ -208,5 +261,30 @@ mod tests {
             &tpdu(&f[0])[6..],
             &[0x03, 0x02, 0x44, 0x00, 0x01, 0x00, 0x83, 0x00, 0xB6, 0x32]
         );
+    }
+
+    #[test]
+    fn filter_table_is_opened_and_written_in_11_octet_chunks() {
+        let plan = [DownloadStep::WriteFilterTable { address: 0x0200, data: vec![0xAA; 23], verify: true }];
+        let frames = plan_to_frames(&plan, 0x1000).unwrap();
+        assert_eq!(frames.len(), 4);
+        assert_eq!(tpdu(&frames[0])[1], 0xC0); // A_FilterTable_Open
+        let first = tpdu(&frames[1]);
+        assert_eq!(first[0] & 0x03, 0x03);
+        assert_eq!(&first[1..5], &[0xC3, 11, 0x02, 0x00]);
+        assert_eq!(&tpdu(&frames[2])[1..5], &[0xC3, 11, 0x02, 0x0B]);
+        assert_eq!(&tpdu(&frames[3])[1..5], &[0xC3, 1, 0x02, 0x16]);
+    }
+
+    #[test]
+    fn objects_by_type_need_a_live_download() {
+        let plan = [DownloadStep::Load { object: Object::Type(6) }];
+        let err = plan_to_frames(&plan, 0x1000).unwrap_err().to_string();
+        assert!(err.contains("by type (6)"), "{err}");
+        let plan = [DownloadStep::ClearFilterTable { object: Object::Index(1) }];
+        let frames = plan_to_frames(&plan, 0x1000).unwrap();
+        let t = tpdu(&frames[0]);
+        assert_eq!(t[0] & 0x03, 0x02); // APCI bits 9..8, behind the TPCI
+        assert_eq!(&t[1..], &[0xC7, 1, 56, 0x00, 0x01]);
     }
 }

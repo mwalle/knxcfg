@@ -5,6 +5,7 @@
 //! serialization boundary around these types — see `docs/plan.md` §5.
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::collections::BTreeSet;
 use std::fmt;
 use std::str::FromStr;
 
@@ -232,6 +233,24 @@ impl Default for Project {
 }
 
 impl Project {
+    /// The group addresses a coupler at `coupler` has to pass: every address
+    /// linked by a device behind it. A coupler at `x.0.0` (area coupler)
+    /// serves the whole area, one at `x.y.0` (line coupler) line `x.y`. Both
+    /// directions need the same addresses: telegrams from a sender behind the
+    /// coupler to receivers elsewhere, and the other way round.
+    pub fn coupler_filter(&self, coupler: IndividualAddress) -> BTreeSet<GroupAddress> {
+        let behind = |ia: IndividualAddress| {
+            ia != coupler
+                && ia.area == coupler.area
+                && (coupler.line == 0 || ia.line == coupler.line)
+        };
+        self.devices
+            .iter()
+            .filter(|d| behind(d.ia))
+            .flat_map(|d| d.links.iter().map(|l| l.ga))
+            .collect()
+    }
+
     /// Normalize all collections into a canonical, deterministic order so
     /// that saving the same project always yields byte-identical files.
     pub fn sort(&mut self) {

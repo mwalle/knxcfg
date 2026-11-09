@@ -823,6 +823,10 @@ pub enum LoadStep {
     Merge(LdCtrlMerge),
     #[serde(rename = "LdCtrlMapError")]
     MapError(LdCtrlMapError),
+    #[serde(rename = "LdCtrlWriteMem")]
+    WriteMem(LdCtrlWriteMem),
+    #[serde(rename = "LdCtrlClearLCFilterTable")]
+    ClearLcFilterTable(LdCtrlClearLcFilterTable),
     /// Parameter-dependent steps (`<choose ParamRefId><when test>`), with the
     /// same semantics as in the `Dynamic` tree.
     #[serde(rename = "choose")]
@@ -842,6 +846,7 @@ impl LoadStep {
             LoadStep::WriteProp(s) => &s.applies_to,
             LoadStep::CompareProp(s) => &s.applies_to,
             LoadStep::LoadImageProp(s) => &s.applies_to,
+            LoadStep::WriteMem(s) => &s.applies_to,
             _ => "",
         }
     }
@@ -881,6 +886,9 @@ pub struct LdCtrlWriteProp {
     pub applies_to: String,
     #[serde(rename = "@ObjIdx", default)]
     pub obj_idx: String,
+    /// The object by type instead of index (`ObjType="6"`, router object).
+    #[serde(rename = "@ObjType", default)]
+    pub obj_type: String,
     #[serde(rename = "@PropId", default)]
     pub prop_id: String,
     #[serde(rename = "@InlineData", default)]
@@ -943,18 +951,49 @@ pub struct LdCtrlMerge {
 pub struct LdCtrlUnload {
     #[serde(rename = "@LsmIdx", default)]
     pub lsm_idx: String,
+    #[serde(rename = "@ObjType", default)]
+    pub obj_type: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct LdCtrlLoad {
     #[serde(rename = "@LsmIdx", default)]
     pub lsm_idx: String,
+    #[serde(rename = "@ObjType", default)]
+    pub obj_type: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
 pub struct LdCtrlLoadCompleted {
     #[serde(rename = "@LsmIdx", default)]
     pub lsm_idx: String,
+    #[serde(rename = "@ObjType", default)]
+    pub obj_type: String,
+}
+
+/// A memory write: `A_Memory_Write` for device memory, the coupler services
+/// for the `LcFilter` (filter table) and `LcSlave` address spaces.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlWriteMem {
+    #[serde(rename = "@AppliesTo", default)]
+    pub applies_to: String,
+    #[serde(rename = "@AddressSpace", default)]
+    pub address_space: String,
+    #[serde(rename = "@Address", default)]
+    pub address: String,
+    #[serde(rename = "@Size", default)]
+    pub size: String,
+    #[serde(rename = "@Verify", default)]
+    pub verify: String,
+    #[serde(rename = "@InlineData", default)]
+    pub inline_data: String,
+}
+
+/// Clear a coupler's filter table before it is written.
+#[derive(Debug, Deserialize, Default, Clone)]
+pub struct LdCtrlClearLcFilterTable {
+    #[serde(rename = "@UseFunctionProp", default)]
+    pub use_function_prop: String,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]

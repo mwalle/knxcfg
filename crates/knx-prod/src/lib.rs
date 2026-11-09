@@ -40,8 +40,9 @@ pub use app::{
     TypeText, TypeTime, Union,
 };
 pub use device_image::{
-    build_device_image, download_plan, read_back_device, DeviceConfiguration, DeviceImage,
-    DownloadKind, DownloadStep, TableImage, TablePlacement,
+    build_coupler_image, build_device_image, download_plan, read_back_device,
+    DeviceConfiguration, DeviceImage, DownloadKind, DownloadStep, Object, TableImage,
+    TablePlacement,
 };
 pub use eval::Evaluation;
 pub use master::{DatapointSubtype, DatapointType, MasterData, MaskProcedure, MaskVersion};

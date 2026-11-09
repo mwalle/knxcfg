@@ -155,12 +155,24 @@ struct Resource {
     name: String,
     #[serde(rename = "@Access", default)]
     access: String,
+    #[serde(rename = "Location", default)]
+    location: Option<Location>,
     #[serde(rename = "ResourceType", default)]
     resource_type: Option<ResourceType>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
+struct Location {
+    #[serde(rename = "@AddressSpace", default)]
+    address_space: String,
+    #[serde(rename = "@StartAddress", default)]
+    start_address: String,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
 struct ResourceType {
+    #[serde(rename = "@Length", default)]
+    length: Option<String>,
     #[serde(rename = "@Flavour", default)]
     flavour: Option<String>,
 }
@@ -182,20 +194,37 @@ impl MaskVersion {
         self.remote_resource(name).is_some()
     }
 
+    /// Where a resource is: address space and start address
+    /// (`LcFilterMemory`, 512).
+    pub fn resource_location(&self, name: &str) -> Option<(&str, u32)> {
+        let l = self.remote_resource(name)?.location.as_ref()?;
+        Some((l.address_space.as_str(), l.start_address.trim().parse().ok()?))
+    }
+
+    /// The length of a resource in octets (`ResourceType/@Length`).
+    pub fn resource_length(&self, name: &str) -> Option<u32> {
+        self.remote_resource(name)?.resource_type.as_ref()?.length.as_deref()?.trim().parse().ok()
+    }
+
     /// The format of a resource (`GroupAddressTable` → `AddressTable_Bcu1`).
     pub fn resource_flavour(&self, name: &str) -> Option<&str> {
         self.remote_resource(name)?.resource_type.as_ref()?.flavour.as_deref()
     }
 
-    /// All procedures of the mask, in document order.
+    /// All procedures of the mask: the current configuration first, then the
+    /// legacy one.
     pub fn procedures(&self) -> impl Iterator<Item = &MaskProcedure> {
-        self.hawk
-            .iter()
+        let current = self.hawk.iter().filter(|h| h.legacy_version.is_none());
+        let legacy = self.hawk.iter().filter(|h| h.legacy_version.is_some());
+        current
+            .chain(legacy)
             .filter_map(|h| h.procedures.as_ref())
             .flat_map(|p| p.items.iter())
     }
 
-    /// The remote `Load` procedure of a sub type (`all`, `par`, `grp`, …).
+    /// The remote `Load` procedure of a sub type (`all`, `par`, `grp`, …),
+    /// from the current configuration if it has one. A coupler mask keeps
+    /// its old procedure in the legacy block (091Ah lists that one first).
     pub fn load_procedure(&self, sub_type: &str) -> Option<&MaskProcedure> {
         self.procedures().find(|p| {
             p.procedure_type == "Load"
@@ -293,5 +322,18 @@ mod tests {
         assert_eq!(mv.resource_flavour("Plain"), None);
         assert!(mv.has_resource("Plain"));
         assert!(!mv.has_resource("OnlyLegacy"));
+    }
+
+    #[test]
+    fn load_procedure_prefers_the_current_block() {
+        let xml = r#"<KNX><MasterData><MaskVersions>
+            <MaskVersion Id="MV-1"><HawkConfigurationData LegacyVersion="1"><Procedures>
+              <Procedure ProcedureType="Load" ProcedureSubType="all" Access="remote"><LdCtrlConnect /></Procedure>
+            </Procedures></HawkConfigurationData><HawkConfigurationData><Procedures>
+              <Procedure ProcedureType="Load" ProcedureSubType="all" Access="remote"><LdCtrlConnect /><LdCtrlRestart /></Procedure>
+            </Procedures></HawkConfigurationData></MaskVersion>
+          </MaskVersions></MasterData></KNX>"#;
+        let m = parse_master(xml).unwrap();
+        assert_eq!(m.mask_version("MV-1").unwrap().load_procedure("all").unwrap().steps.len(), 2);
     }
 }

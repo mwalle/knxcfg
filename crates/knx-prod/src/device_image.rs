@@ -8,6 +8,8 @@
 //!   `<ComObjectTable>` headers and are overlaid into the segment images.
 //! - **System B** (mask 07B0h): the tables are separate byte images, loaded
 //!   into the table interface objects 1/2/3 with `LdCtrlWriteRelMem`.
+//! - **Couplers** (masks 0912h/091Ah): no group tables; [`build_coupler_image`]
+//!   builds the filter table, written with the coupler services.
 //!
 //! [`download_plan`] turns the knxprod load procedure into concrete
 //! [`DownloadStep`]s: the application's own procedure
@@ -16,7 +18,7 @@
 //! (`MergedProcedure`). Every load control is either translated or rejected;
 //! nothing is dropped silently.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 use anyhow::{anyhow, bail, Context, Result};
 
@@ -40,6 +42,8 @@ pub struct DeviceImage {
     pub address_table: TableImage,
     pub association_table: TableImage,
     pub group_object_table: TableImage,
+    /// Couplers: the filter table (see [`tables::build_filter_table`]).
+    pub filter_table: Option<TableImage>,
     /// Parameters whose memory was overwritten by a higher-priority
     /// alternative (see [`crate::memory`]).
     pub shadowed: HashSet<String>,
@@ -92,6 +96,9 @@ pub fn build_device_image_eval(
     links: &[Link],
 ) -> Result<DeviceImage> {
     let ap = ev.ap;
+    if format == TableFormat::Coupler {
+        bail!("{} is a coupler; its image is built by build_coupler_image", ap.id);
+    }
     let static_ = ap
         .static_
         .as_ref()
@@ -177,6 +184,7 @@ pub fn build_device_image_eval(
                 placement: None,
             },
         ),
+        TableFormat::Coupler => unreachable!("refused above"),
     };
 
     Ok(DeviceImage {
@@ -187,6 +195,41 @@ pub fn build_device_image_eval(
         address_table,
         association_table,
         group_object_table,
+        filter_table: None,
+        shadowed: image.shadowed,
+        warnings,
+    })
+}
+
+/// Build the download image for a coupler: its parameters and the filter
+/// table that passes the group addresses `filter`.
+///
+/// Which addresses a coupler has to pass is not part of its configuration;
+/// the caller derives it from the project (the links of the devices behind
+/// the coupler).
+pub fn build_coupler_image(ev: &Evaluation, filter: &BTreeSet<u16>) -> Result<DeviceImage> {
+    let image = build_parameter_image_eval(ev)?;
+    let mut warnings = ev.warnings.clone();
+    warnings.push(
+        "the coupler download follows the spec and the knxprod, but was never compared \
+         with an ETS download"
+            .to_string(),
+    );
+    for k in &ev.unknown_keys {
+        warnings.push(format!("parameter {k} does not exist in {}; ignored", ev.ap.id));
+    }
+    Ok(DeviceImage {
+        segments: image.segments,
+        format: TableFormat::Coupler,
+        active_group_objects: Vec::new(),
+        links: Vec::new(),
+        address_table: TableImage::default(),
+        association_table: TableImage::default(),
+        group_object_table: TableImage::default(),
+        filter_table: Some(TableImage {
+            bytes: tables::build_filter_table(filter.iter().copied()),
+            placement: None,
+        }),
         shadowed: image.shadowed,
         warnings,
     })
@@ -222,6 +265,9 @@ fn overlay(segments: &mut [SegmentImage], id: &str, offset: usize, bytes: Vec<u8
 /// would write (only a comparison with an ETS download can do that).
 pub fn read_back_device(ev: &Evaluation, image: &DeviceImage) -> Result<DeviceConfiguration> {
     let parameters = decode_parameter_image(ev, &image.segments)?;
+    if image.format == TableFormat::Coupler {
+        return Ok(DeviceConfiguration { parameters, links: Vec::new() });
+    }
     let links = tables::read_links(
         image.format,
         &image.address_table.bytes,
@@ -273,10 +319,10 @@ pub enum DownloadStep {
         inline_data: Vec<u8>,
     },
     Unload {
-        lsm_idx: u8,
+        object: Object,
     },
     Load {
-        lsm_idx: u8,
+        object: Object,
     },
     /// Load event `03h 00h/01h` (allocate an absolute data/stack segment)
     /// followed by the segment's data. `data` is empty for RAM and stack
@@ -301,7 +347,7 @@ pub enum DownloadStep {
         app_id: [u8; 5],
     },
     LoadCompleted {
-        lsm_idx: u8,
+        object: Object,
     },
     /// Load event `03h 0Bh` (data relative allocation).
     RelSegment {
@@ -319,10 +365,31 @@ pub enum DownloadStep {
         verify: bool,
     },
     WriteProp {
-        obj_idx: u8,
+        object: Object,
         prop_id: u8,
         data: Vec<u8>,
         verify: bool,
+    },
+    /// `A_Memory_Write` to device memory (`LdCtrlWriteMem`).
+    WriteMem {
+        address: u16,
+        data: Vec<u8>,
+        verify: bool,
+    },
+    /// Write a coupler's filter table (`LdCtrlWriteMem AddressSpace="LcFilter"`):
+    /// `A_FilterTable_Open`, then `A_FilterTable_Write` (`03_05_02 §3.41`,
+    /// DMP_LCExtMemWrite_RCo). `address` is the coupler's memory address
+    /// (0200h is the first octet of the table).
+    WriteFilterTable {
+        address: u16,
+        data: Vec<u8>,
+        verify: bool,
+    },
+    /// Clear the filter table with the function property
+    /// `PID_ROUTETABLE_CONTROL`, service `SRVID_CLEAR_FILTERTABLE`
+    /// (`03_05_01 §4.5.7.2`).
+    ClearFilterTable {
+        object: Object,
     },
     /// Read a property into the image (`LdCtrlLoadImageProp`).
     ReadProp {
@@ -338,6 +405,29 @@ pub enum DownloadStep {
         mapped: u32,
     },
 }
+
+/// An interface object, by index or by type. Load procedures of property
+/// based couplers name the object by type (`ObjType="6"`, router object);
+/// its index has to be read from the device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Object {
+    Index(u8),
+    Type(u16),
+}
+
+impl std::fmt::Display for Object {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Object::Index(i) => write!(f, "ObjIdx={i}"),
+            Object::Type(t) => write!(f, "ObjType={t}"),
+        }
+    }
+}
+
+/// The router object (`03_05_01 §5.3.3`).
+const OBJECT_TYPE_ROUTER: u16 = 6;
+/// The first octet of a coupler's filter table in its memory (`§5.2.1.2`).
+const FILTER_TABLE_ADDRESS: u32 = 0x0200;
 
 /// Build the download sequence for an image.
 ///
@@ -431,14 +521,80 @@ pub fn download_plan(
                 .try_into()
                 .map_err(|_| anyhow!("load step {}: {what} {s:?} out of range", i + 1))
         };
+        let object = |idx: &str, idx_name: &str, obj_type: &str| -> Result<Object> {
+            if idx.trim().is_empty() && !obj_type.trim().is_empty() {
+                let t = n(obj_type, "ObjType")?;
+                Ok(Object::Type(
+                    t.try_into().map_err(|_| anyhow!("load step {}: ObjType {t} out of range", i + 1))?,
+                ))
+            } else {
+                Ok(Object::Index(b(idx, idx_name)?))
+            }
+        };
         out.push(match step {
             LoadStep::Connect => DownloadStep::Connect,
             LoadStep::Disconnect => DownloadStep::Disconnect,
             LoadStep::Restart => DownloadStep::Restart,
-            LoadStep::Unload(s) => DownloadStep::Unload { lsm_idx: b(&s.lsm_idx, "LsmIdx")? },
-            LoadStep::Load(s) => DownloadStep::Load { lsm_idx: b(&s.lsm_idx, "LsmIdx")? },
+            LoadStep::Unload(s) => {
+                DownloadStep::Unload { object: object(&s.lsm_idx, "LsmIdx", &s.obj_type)? }
+            }
+            LoadStep::Load(s) => DownloadStep::Load { object: object(&s.lsm_idx, "LsmIdx", &s.obj_type)? },
             LoadStep::LoadCompleted(s) => {
-                DownloadStep::LoadCompleted { lsm_idx: b(&s.lsm_idx, "LsmIdx")? }
+                DownloadStep::LoadCompleted { object: object(&s.lsm_idx, "LsmIdx", &s.obj_type)? }
+            }
+            LoadStep::WriteMem(s) => {
+                let address = n(&s.address, "Address")?;
+                let size = n(&s.size, "Size")? as usize;
+                let verify = s.verify == "true";
+                let inline = parse_hex(&s.inline_data)
+                    .with_context(|| format!("load step {}: InlineData", i + 1))?;
+                match s.address_space.as_str() {
+                    "" | "StandardMemory" => {
+                        let data = if inline.is_empty() {
+                            memory_range(image, address, size)
+                                .with_context(|| format!("load step {}", i + 1))?
+                        } else {
+                            inline
+                        };
+                        DownloadStep::WriteMem { address: u16_address(address, i)?, data, verify }
+                    }
+                    "LcFilter" => {
+                        let table = image.filter_table.as_ref().ok_or_else(|| {
+                            anyhow!("load step {}: writes a filter table, the image has none", i + 1)
+                        })?;
+                        let start = address
+                            .checked_sub(FILTER_TABLE_ADDRESS)
+                            .map(|o| o as usize)
+                            .filter(|o| o + size <= table.bytes.len())
+                            .ok_or_else(|| {
+                                anyhow!(
+                                    "load step {}: {size} octets at {address:#06x} are outside the \
+                                     filter table",
+                                    i + 1
+                                )
+                            })?;
+                        DownloadStep::WriteFilterTable {
+                            address: u16_address(address, i)?,
+                            data: table.bytes[start..start + size].to_vec(),
+                            verify,
+                        }
+                    }
+                    other => bail!(
+                        "load step {}: LdCtrlWriteMem to address space {other:?} is not supported \
+                         (older coupler configuration)",
+                        i + 1
+                    ),
+                }
+            }
+            LoadStep::ClearLcFilterTable(s) => {
+                if s.use_function_prop != "true" {
+                    bail!(
+                        "load step {}: LdCtrlClearLCFilterTable without UseFunctionProp is not \
+                         supported (older coupler configuration)",
+                        i + 1
+                    );
+                }
+                DownloadStep::ClearFilterTable { object: Object::Type(OBJECT_TYPE_ROUTER) }
             }
             LoadStep::TaskSegment(s) => {
                 let lsm_idx = b(&s.lsm_idx, "LsmIdx")?;
@@ -546,7 +702,7 @@ pub fn download_plan(
                     data = app_id.to_vec();
                 }
                 DownloadStep::WriteProp {
-                    obj_idx: b(&s.obj_idx, "ObjIdx")?,
+                    object: object(&s.obj_idx, "ObjIdx", &s.obj_type)?,
                     prop_id,
                     data,
                     verify: s.verify == "true",
@@ -570,12 +726,34 @@ pub fn download_plan(
             LoadStep::Other => bail!(
                 "load step {}: unsupported load control (supported: Connect, Disconnect, \
                  Restart, Unload, Load, LoadCompleted, AbsSegment, TaskSegment, RelSegment, \
-                 WriteRelMem, WriteProp, CompareProp, LoadImageProp, Delay, MapError, Merge)",
+                 WriteRelMem, WriteProp, CompareProp, LoadImageProp, Delay, MapError, Merge, \
+                 WriteMem, ClearLCFilterTable)",
                 i + 1
             ),
         });
     }
     Ok(out)
+}
+
+/// The bytes of device memory `[address, address + size)`, from the absolute
+/// segment that holds them.
+fn memory_range(image: &DeviceImage, address: u32, size: usize) -> Result<Vec<u8>> {
+    let end = address as usize + size;
+    image
+        .segments
+        .iter()
+        .find_map(|seg| {
+            let start = seg.address.parse::<usize>().ok()?;
+            (start <= address as usize && end <= start + seg.data.len())
+                .then(|| seg.data[address as usize - start..end - start].to_vec())
+        })
+        .ok_or_else(|| anyhow!("no code segment holds {size} octets at {address:#06x}"))
+}
+
+fn u16_address(address: u32, step: usize) -> Result<u16> {
+    address
+        .try_into()
+        .map_err(|_| anyhow!("load step {}: address {address:#x} is above 64 KiB", step + 1))
 }
 
 /// `CompareProp` steps for the device-identity property parameters
@@ -731,8 +909,8 @@ mod tests {
                     merge_id: String::new(),
                     steps: vec![
                         LoadStep::Connect,
-                        LoadStep::Unload(LdCtrlUnload { lsm_idx: "3".into() }),
-                        LoadStep::Load(LdCtrlLoad { lsm_idx: "3".into() }),
+                        LoadStep::Unload(LdCtrlUnload { lsm_idx: "3".into(), ..Default::default() }),
+                        LoadStep::Load(LdCtrlLoad { lsm_idx: "3".into(), ..Default::default() }),
                         LoadStep::AbsSegment(LdCtrlAbsSegment {
                             lsm_idx: "3".into(),
                             seg_type: "0".into(),
@@ -755,7 +933,7 @@ mod tests {
                             lsm_idx: "3".into(),
                             address: "17408".into(),
                         }),
-                        LoadStep::LoadCompleted(LdCtrlLoadCompleted { lsm_idx: "3".into() }),
+                        LoadStep::LoadCompleted(LdCtrlLoadCompleted { lsm_idx: "3".into(), ..Default::default() }),
                         LoadStep::Restart,
                         LoadStep::Disconnect,
                     ],
@@ -843,6 +1021,84 @@ mod tests {
         assert!(download_plan(&Evaluation::new(&ap, &HashMap::new()), &image, None, DownloadKind::Full).is_err());
     }
 
+    /// A property based coupler (091Ah): the current procedure, not the
+    /// legacy one listed first; objects by type; plain memory from the
+    /// absolute segment; the filter table from the image.
+    #[test]
+    fn coupler_plan() {
+        let master_xml = r#"<KNX><MasterData><MaskVersions>
+          <MaskVersion Id="MV-091A" Name="Coupler 091A" ManagementModel="Bcu1">
+            <HawkConfigurationData LegacyVersion="1"><Procedures>
+              <Procedure ProcedureType="Load" ProcedureSubType="all" Access="remote local2">
+                <LdCtrlConnect /><LdCtrlWriteMem AddressSpace="LcSlave" Address="270" Size="8" Verify="true" />
+              </Procedure>
+            </Procedures></HawkConfigurationData>
+            <HawkConfigurationData><Procedures>
+              <Procedure ProcedureType="Load" ProcedureSubType="all" Access="remote local2">
+                <LdCtrlConnect />
+                <LdCtrlUnload ObjType="6" />
+                <LdCtrlLoad ObjType="6" />
+                <LdCtrlWriteProp ObjType="6" PropId="52" Verify="true" InlineData="77" />
+                <LdCtrlMerge MergeId="3" />
+                <LdCtrlClearLCFilterTable UseFunctionProp="true" />
+                <LdCtrlWriteMem AddressSpace="LcFilter" Address="512" Size="8192" Verify="true" />
+                <LdCtrlLoadCompleted ObjType="6" />
+                <LdCtrlRestart />
+              </Procedure>
+            </Procedures></HawkConfigurationData>
+          </MaskVersion>
+        </MaskVersions></MasterData></KNX>"#;
+        let master = crate::master::parse_master(master_xml).unwrap();
+        let procs: crate::LoadProcedures = quick_xml::de::from_str(
+            r#"<LoadProcedures><LoadProcedure MergeId="3">
+                 <LdCtrlWriteMem Address="260" Size="4" Verify="true" />
+               </LoadProcedure></LoadProcedures>"#,
+        )
+        .unwrap();
+        let ap = ApplicationProgram {
+            id: "M-0083_A-0135-11-08B6-O0072".into(),
+            application_number: "309".into(),
+            application_version: "17".into(),
+            mask_version: "MV-091A".into(),
+            load_procedure_style: "MergedProcedure".into(),
+            static_: Some(crate::Static {
+                code: Some(crate::Code {
+                    absolute: vec![crate::Segment {
+                        id: "AS-0100".into(),
+                        address: "256".into(),
+                        size: "8".into(),
+                        data: Some("AAECAwQFBgc=".into()), // 00 01 .. 07
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }),
+                load_procedures: Some(procs),
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let ev = Evaluation::new(&ap, &HashMap::new());
+        let image = build_coupler_image(&ev, &BTreeSet::from([0x0001, 0x0901])).unwrap();
+        assert_eq!(image.format, TableFormat::Coupler);
+        let plan = download_plan(&ev, &image, Some(&master), DownloadKind::Full).unwrap();
+        let router = Object::Type(6);
+        assert_eq!(plan[..6], [
+            DownloadStep::Connect,
+            DownloadStep::Unload { object: router },
+            DownloadStep::Load { object: router },
+            DownloadStep::WriteProp { object: router, prop_id: 52, data: vec![0x77], verify: true },
+            DownloadStep::WriteMem { address: 260, data: vec![4, 5, 6, 7], verify: true },
+            DownloadStep::ClearFilterTable { object: router },
+        ]);
+        let DownloadStep::WriteFilterTable { address, data, verify } = &plan[6] else {
+            panic!("{:?}", plan[6]);
+        };
+        assert_eq!((*address, data.len(), *verify), (0x0200, 8192, true));
+        assert_eq!(tables::read_filter_table(data), vec![0x0001, 0x0901]);
+        assert_eq!(plan[7..], [DownloadStep::LoadCompleted { object: router }, DownloadStep::Restart]);
+        assert!(read_back_device(&ev, &image).unwrap().links.is_empty());
+    }
+
     #[test]
     fn merged_procedure_system_b() {
         let master_xml = r#"<KNX><MasterData><MaskVersions>
@@ -911,9 +1167,9 @@ mod tests {
             plan,
             vec![
                 DownloadStep::Connect,
-                DownloadStep::Load { lsm_idx: 4 },
+                DownloadStep::Load { object: Object::Index(4) },
                 DownloadStep::RelSegment { lsm_idx: 4, size: 4, mode: 1, fill: 0 },
-                DownloadStep::Load { lsm_idx: 1 },
+                DownloadStep::Load { object: Object::Index(1) },
                 DownloadStep::RelSegment { lsm_idx: 1, size: 4, mode: 0, fill: 0 },
                 DownloadStep::WriteRelMem { obj_idx: 4, offset: 0, data: vec![1, 2, 3, 4], verify: true },
                 DownloadStep::WriteRelMem {
@@ -923,7 +1179,7 @@ mod tests {
                     verify: true
                 },
                 DownloadStep::WriteProp {
-                    obj_idx: 4,
+                    object: Object::Index(4),
                     prop_id: 13,
                     data: vec![0x00, 0x71, 0x14, 0x21, 0x14],
                     verify: true

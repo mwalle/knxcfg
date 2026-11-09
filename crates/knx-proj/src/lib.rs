@@ -420,6 +420,7 @@ impl ProjectFile {
 
         let mut products: HashMap<String, ResolvedProduct> = HashMap::new();
         let mut checks = Vec::new();
+        let mut couplers = Vec::new();
         let mut seen = HashSet::new();
         for xml_area in self.installation.topology.iter().flat_map(|t| &t.areas) {
             let mut area = Area {
@@ -456,6 +457,9 @@ impl ProjectFile {
                     }
                     let product = &products[&dev.h2p];
                     let converted = convert_device(dev, ia, product, &ga_ids);
+                    if let Some(values) = converted.coupler_values {
+                        couplers.push((ia, dev.h2p.clone(), values, checks.len()));
+                    }
                     warnings.extend(converted.warnings.iter().map(|w| format!("{ia}: {w}")));
                     checks.push(DeviceCheck {
                         ia,
@@ -481,6 +485,18 @@ impl ProjectFile {
                 area.lines.push(line);
             }
             project.topology.push(area);
+        }
+        // A coupler's filter table needs the links of all the other devices.
+        for (ia, h2p, values, check) in couplers {
+            let ev = Evaluation::new(&products[&h2p].application, &values);
+            let filter = project.coupler_filter(ia).iter().map(|ga| ga.to_u16()).collect();
+            match knx_prod::build_coupler_image(&ev, &filter) {
+                Ok(image) => warnings.extend(image.warnings.iter().map(|w| format!("{ia}: {w}"))),
+                Err(e) => {
+                    warnings.push(format!("{ia}: no download image can be built: {e:#}"));
+                    checks[check].image_error = Some(format!("{e:#}"));
+                }
+            }
         }
         project.sort();
         Ok(Imported { project, warnings, checks })
@@ -593,6 +609,9 @@ struct ConvertedDevice {
     compared_arguments: usize,
     argument_mismatches: Vec<String>,
     image_error: Option<String>,
+    /// A coupler's parameter values; its image is built once all devices are
+    /// known.
+    coupler_values: Option<HashMap<String, String>>,
 }
 
 /// Where a project `RefId` points to in the application: the scope and the
@@ -808,12 +827,14 @@ fn convert_device(
         .iter()
         .map(|l| Link { asap: l.object_number, ga: l.ga.to_u16(), send: l.send })
         .collect();
+    let coupler = product.table_format == Ok(TableFormat::Coupler);
     let image = product
         .table_format
         .clone()
         .map_err(|e| anyhow!(e))
         .and_then(|format| knx_prod::device_image::build_device_image_eval(&ev, format, &table_links));
     let image_error = match image {
+        _ if coupler => None, // built in `convert`, once all links are known
         Ok(image) => {
             warnings.extend(image.warnings);
             None
@@ -839,6 +860,7 @@ fn convert_device(
         compared_arguments,
         argument_mismatches,
         image_error,
+        coupler_values: coupler.then_some(user),
     }
 }
 

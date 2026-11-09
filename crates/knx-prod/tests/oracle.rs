@@ -44,8 +44,12 @@ fn table_format_of_the_real_masks() {
         assert!(format(id).unwrap_err().to_string().contains("cannot encode"), "{id}");
     }
     for id in ["MV-0912", "MV-091A"] {
-        assert!(format(id).unwrap_err().to_string().contains("is a coupler"), "{id}");
+        assert_eq!(format(id).unwrap(), TableFormat::Coupler, "{id}");
     }
+    for id in ["MV-0900", "MV-0910", "MV-0911"] {
+        assert!(format(id).unwrap_err().to_string().contains("3584 octets"), "{id}");
+    }
+    assert!(format("MV-2920").unwrap_err().to_string().contains("Coupler Model 2.0"));
     assert!(format("MV-0310").unwrap_err().to_string().contains("no group tables"));
 }
 

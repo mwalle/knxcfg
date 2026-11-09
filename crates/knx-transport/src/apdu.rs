@@ -30,6 +30,9 @@
 //! | `A_IndividualAddressSerialNumber_Read`     | `1111011100` |
 //! | `A_IndividualAddressSerialNumber_Response` | `1111011101` |
 //! | `A_IndividualAddressSerialNumber_Write`    | `1111011110` |
+//! | `A_FunctionPropertyCommand` | `1011000111`   |
+//! | `A_FilterTable_Open`        | `1111000000`   |
+//! | `A_FilterTable_Write`       | `1111000011`   |
 //!
 //! On the wire the APCI shares its first octet with the Transport Layer
 //! control field: octet 6 of the frame is `TPCI (6 bits) | APCI bits 9..8`,
@@ -59,6 +62,15 @@ pub mod apci {
     pub const RESTART: u16 = 0x380;
     pub const PROPERTY_VALUE_READ: u16 = 0x3D5;
     pub const PROPERTY_VALUE_WRITE: u16 = 0x3D7;
+    pub const FUNCTION_PROPERTY_COMMAND: u16 = 0x2C7;
+    pub const FUNCTION_PROPERTY_STATE_RESPONSE: u16 = 0x2C9;
+    pub const FILTER_TABLE_OPEN: u16 = 0x3C0;
+    pub const FILTER_TABLE_WRITE: u16 = 0x3C3;
+
+    /// `PID_ROUTETABLE_CONTROL` of the router object (`03_05_01 §4.5.7`).
+    pub const PID_ROUTETABLE_CONTROL: u8 = 56;
+    /// `SRVID_CLEAR_FILTERTABLE` (`03_05_01 §4.5.7.2`).
+    pub const SRVID_CLEAR_FILTERTABLE: u8 = 1;
 
     /// `PID_LOAD_STATE_CONTROL` (`03_05_01 §4.2.5`).
     pub const PID_LOAD_STATE_CONTROL: u8 = 5;
@@ -112,6 +124,35 @@ pub fn property_value_write(
     data: &[u8],
 ) -> Vec<u8> {
     let mut out = property_header(apci::PROPERTY_VALUE_WRITE, object_index, property_id, nr_of_elem, start_index);
+    out.extend_from_slice(data);
+    out
+}
+
+/// `A_FunctionPropertyCommand` (`03_03_07 §3.4.7.1`):
+/// `[APCI:2][object_index][property_id][data]`.
+pub fn function_property_command(object_index: u8, property_id: u8, data: &[u8]) -> Vec<u8> {
+    let mut out = apci_octets(apci::FUNCTION_PROPERTY_COMMAND, 0).to_vec();
+    out.push(object_index);
+    out.push(property_id);
+    out.extend_from_slice(data);
+    out
+}
+
+/// `A_FilterTable_Open` (`03_03_07 §3.6.1`): no fields.
+pub fn filter_table_open() -> Vec<u8> {
+    apci_octets(apci::FILTER_TABLE_OPEN, 0).to_vec()
+}
+
+/// `A_FilterTable_Write` (`03_03_07 §3.6.3`):
+/// `[APCI:2][number][filter_table_address:2][data]`, 1..=254 octets.
+pub fn filter_table_write(address: u16, data: &[u8]) -> Vec<u8> {
+    assert!(
+        !data.is_empty() && data.len() <= 254,
+        "A_FilterTable_Write carries 1..=254 octets"
+    );
+    let mut out = apci_octets(apci::FILTER_TABLE_WRITE, 0).to_vec();
+    out.push(data.len() as u8);
+    out.extend_from_slice(&address.to_be_bytes());
     out.extend_from_slice(data);
     out
 }

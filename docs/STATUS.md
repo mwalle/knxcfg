@@ -139,6 +139,21 @@ parameter image and the System B tables are spec/knxprod-derived and not yet
 compared with an ETS download. The plan is encoded as cEMI frames
 (`download --frames`) except `LdCtrlWriteRelMem`, which needs the device's
 `PID_TABLE_REFERENCE` at run time.
+**Couplers** (masks 0912h/091Ah, property based configuration): the image is the
+parameter memory plus a filter table (`03_05_01 §5.2.1`, one bit per group address
+at 0200h) that passes every group address linked by a device behind the coupler
+(`x.0.0`: the whole area, `x.y.0`: line `x.y`; `Project::coupler_filter`). The plan
+follows the mask's current procedure: load state machine of the router object,
+`LdCtrlWriteMem` (`A_Memory_Write`), `LdCtrlClearLCFilterTable`
+(`PID_ROUTETABLE_CONTROL`, `SRVID_CLEAR_FILTERTABLE`) and the filter table
+through `A_FilterTable_Open`/`_Write` (`03_05_02 §3.41`). Taking `LcFilter` as the
+address space of those services is inferred from the names, not stated in the
+spec. The procedure names the router object by type, so frames can only be
+encoded during a live download (which reads the object index). Not supported:
+the legacy procedures (`LcSlave`, `LdCtrlSetControlVariable`), couplers with
+3.5 KiB tables (0900h–0911h) and Coupler Model 2.0 (2920h). Never compared with
+an ETS download; how ETS chooses the addresses (e.g. pass-through flags) is not
+in the spec.
 **M4** (USB transport, in progress): USB HID framing, `hidraw`, the EMI
 handshake, the TL connection and DD0/memory reads are implemented and
 tested against scripted mocks. Hardware runs (knx-usb interface, own
@@ -177,8 +192,7 @@ download/read-back · **M3** `.knxproj` export · **M6** hardening.
   table end (the template residue is kept).
 - The memory encoder rejects `TypeText` parameters ("parameter type has no size")
   and an IP address default of `0`, so MDT application `A-0133-10-9E94` (mask 07B0)
-  has no image. Couplers (`MV-091A`, …) cannot be downloaded: they have a filter
-  table, no group tables, and load controls of their own. Calculations using `switch`
+  has no image. Couplers: see "Couplers" below. Calculations using `switch`
   (`A-018A-31-EEE8`, `MappingError`) are outside the JS subset.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 

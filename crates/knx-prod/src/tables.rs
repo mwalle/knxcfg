@@ -50,6 +50,10 @@ pub enum TableFormat {
     System7,
     /// System B: mask 07B0h and those with the same tables.
     SystemB,
+    /// A coupler: no group tables, a filter table of one bit per group
+    /// address instead (`03_05_01 §5.2.1`, Realisation Type 2, masks 0912h
+    /// and 091Ah in their property based configuration).
+    Coupler,
 }
 
 impl TableFormat {
@@ -84,15 +88,49 @@ impl TableFormat {
                 mask.id,
                 mask.name
             ),
-            _ if mask.has_resource("GroupFilterTable") => bail!(
-                "mask {} ({}) is a coupler: it has a filter table instead of group tables, \
-                 and knxcfg cannot download couplers yet",
+            _ if mask.resource_length("GroupFilterTable") == Some(FILTER_TABLE_LEN as u32)
+                && mask.resource_location("GroupFilterTable") == Some(("LcFilterMemory", 0x0200)) =>
+            {
+                Ok(TableFormat::Coupler)
+            }
+            _ if mask.resource_length("GroupFilterTable") == Some(FILTER_TABLE_LEN as u32) => bail!(
+                "mask {} ({}) is a coupler whose filter table is not at the fixed address 0200h \
+                 (Coupler Model 2.0, Realisation Type 3); knxcfg cannot download it yet",
                 mask.id,
                 mask.name
+            ),
+            _ if mask.has_resource("GroupFilterTable") => bail!(
+                "mask {} ({}) is a coupler with a filter table of {} octets; knxcfg only \
+                 builds the full table of {FILTER_TABLE_LEN} octets (masks 0912h, 091Ah)",
+                mask.id,
+                mask.name,
+                mask.resource_length("GroupFilterTable").unwrap_or(0)
             ),
             _ => bail!("mask {} ({}) has no group tables that knxcfg can use", mask.id, mask.name),
         }
     }
+}
+
+/// The filter table of a coupler: one bit for each of the 65536 group
+/// addresses (`03_05_01 §5.2.1.3`).
+pub const FILTER_TABLE_LEN: usize = 8192;
+
+/// Build a coupler's filter table: the bit of a group address is set when
+/// telegrams to it are passed. Bit `ga mod 8` (LSB first) of octet `ga div 8`;
+/// group address 0 (broadcast) is never set.
+pub fn build_filter_table(gas: impl IntoIterator<Item = u16>) -> Vec<u8> {
+    let mut table = vec![0u8; FILTER_TABLE_LEN];
+    for ga in gas.into_iter().filter(|&ga| ga != 0) {
+        table[ga as usize / 8] |= 1 << (ga % 8);
+    }
+    table
+}
+
+/// The group addresses set in a filter table.
+pub fn read_filter_table(table: &[u8]) -> Vec<u16> {
+    (1..=u16::MAX)
+        .filter(|&ga| table.get(ga as usize / 8).is_some_and(|b| b & (1 << (ga % 8)) != 0))
+        .collect()
 }
 
 /// One entry of the Association Table.
@@ -432,6 +470,7 @@ pub fn build_address_and_association_tables(
             build_group_address_table_b(&gas)?,
             build_association_table_b(&assocs)?,
         ),
+        TableFormat::Coupler => bail!("a coupler has no group address and association tables"),
     })
 }
 
@@ -515,6 +554,7 @@ pub fn read_group_address_table(format: TableFormat, data: &[u8]) -> Result<Vec<
             }
             (u16::from_be_bytes([data[0], data[1]]) as usize, 2)
         }
+        TableFormat::Coupler => bail!("a coupler has no group address table"),
     };
     let needed = start + count * 2;
     if data.len() < needed {
@@ -538,6 +578,7 @@ pub fn read_association_table(format: TableFormat, data: &[u8]) -> Result<Vec<As
             }
             (u16::from_be_bytes([data[0], data[1]]) as usize, 2, 2)
         }
+        TableFormat::Coupler => bail!("a coupler has no association table"),
     };
     let needed = start + count * 2 * width;
     if data.len() < needed {
@@ -723,6 +764,21 @@ pub fn build_group_object_table_b(
 
 #[cfg(test)]
 mod tests {
+
+    /// The examples of `03_05_01`: 7/1879 (3F57h) is bit 7 of octet 07EAh
+    /// (§5.3.1.1.1), 0/232 (E8h) bit 0 of octet 1Dh, at 021Dh in the
+    /// coupler's memory (§5.2.1.3).
+    #[test]
+    fn filter_table_bits_follow_the_spec_examples() {
+        let t = build_filter_table([0x3F57, 0x00E8, 0]);
+        assert_eq!(t.len(), FILTER_TABLE_LEN);
+        assert_eq!(t[0x07EA], 0x80);
+        assert_eq!(t[0x1D], 0x01);
+        assert_eq!(t[0], 0, "group address 0 is never set");
+        assert_eq!(t.iter().filter(|b| **b != 0).count(), 2);
+        assert_eq!(read_filter_table(&t), vec![0x00E8, 0x3F57]);
+    }
+
     use super::*;
 
     fn obj(comm: bool) -> GroupObject {
