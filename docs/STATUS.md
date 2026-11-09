@@ -178,26 +178,29 @@ Still to do for M2: per-object flag/priority overrides (reported at import,
 not yet applied to the tables), confirming that the first `Links` entry is the
 sending address, and keeping the data listed under "Not imported" in
 `docs/knxproj-format.md`, which M3 needs (D7 Buildings/Functions).
-Next: finish **M2** · finish **M4** with a hardware run, then live
-download/read-back · **M3** `.knxproj` export · **M6** hardening.
+Next: **knx-sim** (`docs/sim-plan.md`): a KNXnet/IP interface with simulated
+devices, so ETS and `knxcfg` download into the same simulation and the device
+states are compared; it also unblocks the live download · finish **M2** ·
+finish **M4** · **M3** `.knxproj` export · **M6** hardening.
 
 ## Known loose ends
 - Not supported (reported, not silent): KNX Data Secure (download only works
   with security off), `Allocator`-based module arguments, `<Property>`
   parameters other than the device hardware checks, calculations outside
-  the JS subset (KLIC's Steinhart-Hart tables), coupler programming.
+  the JS subset (KLIC's Steinhart-Hart tables), couplers other than masks
+  0912h/091Ah.
 - Unverified against ETS: System B table bytes, the partial download, the
   communication flag of unlinked System B objects, rounding of calculation
   results into integer parameters, the content of table segments behind the
   table end (the template residue is kept).
 - The memory encoder rejects `TypeText` parameters ("parameter type has no size")
   and an IP address default of `0`, so MDT application `A-0133-10-9E94` (mask 07B0)
-  has no image. Couplers: see "Couplers" below. Calculations using `switch`
+  has no image. Couplers: see "Couplers" under Milestones. Calculations using `switch`
   (`A-018A-31-EEE8`, `MappingError`) are outside the JS subset.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
-`cargo build --offline` · `cargo test --offline` (98 tests, incl. the ETS5
+`cargo build --offline` · `cargo test --offline` (106 tests, incl. the ETS5
 oracle regression test that reads `refs/knxprod` and the import of the ETS
 projects in `refs/knxproj`).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),
