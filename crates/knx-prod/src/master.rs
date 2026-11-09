@@ -4,7 +4,8 @@
 //!
 //! - **mask versions** with their load procedures — applications with
 //!   `LoadProcedureStyle="MergedProcedure"` only carry fragments that are
-//!   merged into the mask's procedure (`<LdCtrlMerge MergeId>`);
+//!   merged into the mask's procedure (`<LdCtrlMerge MergeId>`) — and their
+//!   resources, whose `Flavour` names the format of the group tables;
 //! - **datapoint types** (`DPT-1`, `DPST-1-1`, …) for validating and naming
 //!   the DPTs of group addresses and group objects.
 
@@ -133,11 +134,59 @@ pub struct MaskVersion {
 
 #[derive(Debug, Deserialize, Default, Clone)]
 struct HawkConfigurationData {
+    /// Set on the older block of a mask that has two (07B0h: M112 tables).
+    #[serde(rename = "@LegacyVersion", default)]
+    legacy_version: Option<String>,
+    #[serde(rename = "Resources", default)]
+    resources: Option<Resources>,
     #[serde(rename = "Procedures", default)]
     procedures: Option<Procedures>,
 }
 
+#[derive(Debug, Deserialize, Default, Clone)]
+struct Resources {
+    #[serde(rename = "Resource", default)]
+    items: Vec<Resource>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct Resource {
+    #[serde(rename = "@Name", default)]
+    name: String,
+    #[serde(rename = "@Access", default)]
+    access: String,
+    #[serde(rename = "ResourceType", default)]
+    resource_type: Option<ResourceType>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct ResourceType {
+    #[serde(rename = "@Flavour", default)]
+    flavour: Option<String>,
+}
+
 impl MaskVersion {
+    /// A resource reachable over the bus, from the current (not legacy)
+    /// configuration of the mask.
+    fn remote_resource(&self, name: &str) -> Option<&Resource> {
+        self.hawk
+            .iter()
+            .filter(|h| h.legacy_version.is_none())
+            .filter_map(|h| h.resources.as_ref())
+            .flat_map(|r| r.items.iter())
+            .find(|r| r.name == name && r.access.split_whitespace().any(|a| a == "remote"))
+    }
+
+    /// Whether the mask has this resource (`GroupFilterTable`, …).
+    pub fn has_resource(&self, name: &str) -> bool {
+        self.remote_resource(name).is_some()
+    }
+
+    /// The format of a resource (`GroupAddressTable` → `AddressTable_Bcu1`).
+    pub fn resource_flavour(&self, name: &str) -> Option<&str> {
+        self.remote_resource(name)?.resource_type.as_ref()?.flavour.as_deref()
+    }
+
     /// All procedures of the mask, in document order.
     pub fn procedures(&self) -> impl Iterator<Item = &MaskProcedure> {
         self.hawk
@@ -224,5 +273,25 @@ mod tests {
         assert_eq!(st.unwrap().name, "DPT_Value_Temp");
         assert!(m.datapoint("9.001").is_some());
         assert!(m.datapoint("DPT-99").is_none());
+    }
+
+    #[test]
+    fn resources_come_from_the_current_block() {
+        let xml = r#"<KNX><MasterData><MaskVersions>
+            <MaskVersion Id="MV-1"><HawkConfigurationData LegacyVersion="1"><Resources>
+              <Resource Name="T" Access="remote"><ResourceType Flavour="old" /></Resource>
+              <Resource Name="OnlyLegacy" Access="remote"><ResourceType Flavour="old" /></Resource>
+            </Resources></HawkConfigurationData><HawkConfigurationData><Resources>
+              <Resource Name="T" Access="local1"><ResourceType Flavour="local" /></Resource>
+              <Resource Name="T" Access="remote local2"><ResourceType Flavour="new" /></Resource>
+              <Resource Name="Plain" Access="remote"><ResourceType Length="1" /></Resource>
+            </Resources></HawkConfigurationData></MaskVersion>
+          </MaskVersions></MasterData></KNX>"#;
+        let m = parse_master(xml).unwrap();
+        let mv = m.mask_version("MV-1").unwrap();
+        assert_eq!(mv.resource_flavour("T"), Some("new"));
+        assert_eq!(mv.resource_flavour("Plain"), None);
+        assert!(mv.has_resource("Plain"));
+        assert!(!mv.has_resource("OnlyLegacy"));
     }
 }

@@ -110,6 +110,11 @@ impl KnxProd {
         app::parse_application_program(&app_xml)
     }
 
+    /// The format of an application's tables (see [`tables::TableFormat::of`]).
+    pub fn table_format(&self, ap: &ApplicationProgram) -> Result<tables::TableFormat> {
+        tables::TableFormat::of_application(ap, &self.master_data()?)
+    }
+
     /// Parse the archive's `knx_master.xml` (mask versions with their load
     /// procedures, datapoint types).
     pub fn master_data(&self) -> Result<MasterData> {

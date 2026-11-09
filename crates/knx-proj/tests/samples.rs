@@ -26,8 +26,11 @@ fn resolve(file: &ProjectFile, dir: &std::path::Path, h2p: &str) -> Result<Resol
     let dest = dir.join(format!("{manufacturer}.knxprod"));
     file.extract_product(manufacturer, &dest)?;
     let kp = knx_prod::KnxProd::open(&dest)?;
+    let application = kp.application_program(h2p)?;
+    let table_format = kp.table_format(&application).map_err(|e| format!("{e:#}"));
     Ok(ResolvedProduct {
-        application: kp.application_program(h2p)?,
+        application,
+        table_format,
         name: h2p.to_string(),
         knxprod: None,
     })

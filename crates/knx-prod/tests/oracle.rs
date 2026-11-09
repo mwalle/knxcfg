@@ -24,6 +24,31 @@ fn knxprod() -> Option<KnxProd> {
     Some(KnxProd::open(path).unwrap())
 }
 
+/// The table format follows the flavours in the real master data, not a list
+/// of mask numbers.
+#[test]
+fn table_format_of_the_real_masks() {
+    use knx_prod::tables::TableFormat::{self, SystemB, System7};
+
+    let Some(kp) = knxprod() else { return };
+    let master = kp.master_data().unwrap();
+    let format = |id: &str| TableFormat::of(master.mask_version(id).unwrap());
+
+    for id in ["MV-0700", "MV-0701", "MV-0705", "MV-2705", "MV-5705"] {
+        assert_eq!(format(id).unwrap(), System7, "{id}");
+    }
+    for id in ["MV-07B0", "MV-17B0", "MV-27B0", "MV-57B0"] {
+        assert_eq!(format(id).unwrap(), SystemB, "{id}");
+    }
+    for id in ["MV-0012", "MV-0020"] {
+        assert!(format(id).unwrap_err().to_string().contains("cannot encode"), "{id}");
+    }
+    for id in ["MV-0912", "MV-091A"] {
+        assert!(format(id).unwrap_err().to_string().contains("is a coupler"), "{id}");
+    }
+    assert!(format("MV-0310").unwrap_err().to_string().contains("no group tables"));
+}
+
 #[test]
 fn tables_match_the_ets5_download() {
     let Some(kp) = knxprod() else { return };
@@ -35,7 +60,8 @@ fn tables_match_the_ets5_download() {
     let links = [Link::new(0, 0x000A), Link::new(6, 0x000B), Link::new(23, 0x000C)];
 
     let ev = knx_prod::Evaluation::new(&ap, &values);
-    let image = knx_prod::device_image::build_device_image_eval(&ev, &links).unwrap();
+    let format = kp.table_format(&ap).unwrap();
+    let image = knx_prod::device_image::build_device_image_eval(&ev, format, &links).unwrap();
     assert!(image.warnings.is_empty(), "{:?}", image.warnings);
 
     assert_eq!(image.address_table.bytes, [0x04, 0x00, 0x00, 0x00, 0x0A, 0x00, 0x0B, 0x00, 0x0C]);

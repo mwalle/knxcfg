@@ -53,7 +53,9 @@ D14 product store: project `vendor/` (default) + global
     little-endian option, active alternatives win shared memory.
   - `tables` — System 7 (mask 0701/0705, memory mapped, ETS5-confirmed) and
     System B (mask 07B0, property based, spec-derived) GrAT/GrOAT/GoT;
-    sending GA first; `MaxEntries` and field-width checks.
+    sending GA first; `MaxEntries` and field-width checks. The format is chosen
+    by the `Flavour` of the mask's table resources, so 0700, 2705, 5705, 17B0,
+    27B0 and 57B0 are accepted too, with a warning as they were never tried.
   - `device_image` — full image + `download_plan` for `ProductProcedure`
     and `MergedProcedure` (mask procedure from `knx_master.xml`, `AppliesTo`,
     `choose` in load procedures, `RelSegment`/`WriteRelMem`/`WriteProp`/
@@ -175,7 +177,8 @@ download/read-back · **M3** `.knxproj` export · **M6** hardening.
   table end (the template residue is kept).
 - The memory encoder rejects `TypeText` parameters ("parameter type has no size")
   and an IP address default of `0`, so MDT application `A-0133-10-9E94` (mask 07B0)
-  has no image. `MV-091A` is not a supported mask. Calculations using `switch`
+  has no image. Couplers (`MV-091A`, …) cannot be downloaded: they have a filter
+  table, no group tables, and load controls of their own. Calculations using `switch`
   (`A-018A-31-EEE8`, `MappingError`) are outside the JS subset.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 

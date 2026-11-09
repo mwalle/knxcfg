@@ -31,7 +31,7 @@ use knx_core::{
     IndividualAddress, Line, ParameterValue, Project,
 };
 use knx_prod::eval::{full_key, short_key};
-use knx_prod::tables::{self, GroupObject, Link};
+use knx_prod::tables::{self, GroupObject, Link, TableFormat};
 use knx_prod::{ApplicationProgram, Evaluation};
 use serde::Deserialize;
 
@@ -455,7 +455,7 @@ impl ProjectFile {
                         products.insert(dev.h2p.clone(), resolve(&dev.h2p)?);
                     }
                     let product = &products[&dev.h2p];
-                    let converted = convert_device(dev, ia, &product.application, &ga_ids);
+                    let converted = convert_device(dev, ia, product, &ga_ids);
                     warnings.extend(converted.warnings.iter().map(|w| format!("{ia}: {w}")));
                     checks.push(DeviceCheck {
                         ia,
@@ -543,6 +543,8 @@ impl XmlLine {
 /// The product data of one device type.
 pub struct ResolvedProduct {
     pub application: ApplicationProgram,
+    /// The format of the tables, or why no image can be built for this product.
+    pub table_format: std::result::Result<TableFormat, String>,
     /// Catalog name, used for devices without a name of their own.
     pub name: String,
     /// knxprod path to record on the device (see `DeviceRef::knxprod`).
@@ -692,9 +694,10 @@ fn parameter_values(
 fn convert_device(
     dev: &XmlDevice,
     ia: IndividualAddress,
-    ap: &ApplicationProgram,
+    product: &ResolvedProduct,
     ga_ids: &GaIds,
 ) -> ConvertedDevice {
+    let ap = &product.application;
     let mut warnings = Vec::new();
     let values = parameter_values(dev, ap, &mut warnings);
     let user: HashMap<String, String> =
@@ -805,7 +808,12 @@ fn convert_device(
         .iter()
         .map(|l| Link { asap: l.object_number, ga: l.ga.to_u16(), send: l.send })
         .collect();
-    let image_error = match knx_prod::device_image::build_device_image_eval(&ev, &table_links) {
+    let image = product
+        .table_format
+        .clone()
+        .map_err(|e| anyhow!(e))
+        .and_then(|format| knx_prod::device_image::build_device_image_eval(&ev, format, &table_links));
+    let image_error = match image {
         Ok(image) => {
             warnings.extend(image.warnings);
             None

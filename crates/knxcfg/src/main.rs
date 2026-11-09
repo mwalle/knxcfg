@@ -394,8 +394,11 @@ fn cmd_import(dir: &Path, file: &Path, force: bool) -> Result<()> {
             .find(|p| p.hardware2program_ref_id.as_deref() == Some(h2p))
             .map(|p| p.name.clone())
             .unwrap_or_default();
+        let application = kp.application_program(h2p).with_context(|| format!("resolving {h2p}"))?;
+        let table_format = kp.table_format(&application).map_err(|e| format!("{e:#}"));
         Ok(knx_proj::ResolvedProduct {
-            application: kp.application_program(h2p).with_context(|| format!("resolving {h2p}"))?,
+            application,
+            table_format,
             name,
             knxprod: Some(product_store::record_path(dir, &path)),
         })
@@ -792,7 +795,7 @@ fn cmd_tables(file: &PathBuf, h2p: &str) -> Result<()> {
         .application_program(h2p)
         .with_context(|| format!("resolving {h2p}"))?;
 
-    let image = knx_prod::build_device_image(&ap, &HashMap::new(), &[])?;
+    let image = knx_prod::build_device_image(&ap, knxprod.table_format(&ap)?, &HashMap::new(), &[])?;
     print_warnings(&image.warnings);
     println!(
         "{}: {} active group object(s), {:?} tables",
@@ -853,7 +856,8 @@ fn cmd_download(
                 .join("\n  ")
         );
     }
-    let image = knx_prod::device_image::build_device_image_eval(&ev, &links)?;
+    let format = device.knxprod.table_format(ap)?;
+    let image = knx_prod::device_image::build_device_image_eval(&ev, format, &links)?;
 
     println!("Download image for {ia} ({})", device.device_ref.name);
     print_warnings(&image.warnings);

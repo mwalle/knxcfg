@@ -1,7 +1,9 @@
 //! Group communication tables (M5): Group Address Table (GrAT),
 //! Group Object Association Table (GrOAT) and Group Object Table (GoT).
 //!
-//! Two table families are implemented, selected by the mask version
+//! Two table families are implemented, selected by the `Flavour` of the
+//! mask's table resources in `knx_master.xml` (see [`TableFormat::of`]), named
+//! here by the masks they were written for
 //! ([`TableFormat`]):
 //!
 //! **System 7** (BIM M112, masks 0701h/0705h), memory mapped, absolute
@@ -35,37 +37,60 @@
 
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{bail, Result};
+use anyhow::{anyhow, bail, Result};
 
 use crate::eval::Evaluation;
+use crate::master::{MasterData, MaskVersion};
 use crate::{ApplicationProgram, ComObject, ComObjectRef};
 
 /// The table realisation family of a mask version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TableFormat {
-    /// Masks 0701h/0705h (BIM M112 / "System 7").
+    /// BIM M112 / "System 7": masks 0701h/0705h and those with the same tables.
     System7,
-    /// Mask 07B0h (System B).
+    /// System B: mask 07B0h and those with the same tables.
     SystemB,
 }
 
 impl TableFormat {
-    /// The format for a knxprod `MaskVersion` id (`MV-0705`, …).
-    pub fn for_mask(mask: &str) -> Option<Self> {
-        match mask.trim_start_matches("MV-") {
-            "0701" | "0705" => Some(TableFormat::System7),
-            "07B0" => Some(TableFormat::SystemB),
-            _ => None,
-        }
+    /// The format of an application's tables, from the mask in the master data.
+    pub fn of_application(ap: &ApplicationProgram, master: &MasterData) -> Result<Self> {
+        let mask = master
+            .mask_version(&ap.mask_version)
+            .ok_or_else(|| anyhow!("mask version {} not found in knx_master.xml", ap.mask_version))?;
+        Self::of(mask)
     }
 
-    pub fn of(ap: &ApplicationProgram) -> Result<Self> {
-        match Self::for_mask(&ap.mask_version) {
-            Some(f) => Ok(f),
-            None => bail!(
-                "mask version {} is not supported (supported: MV-0701, MV-0705, MV-07B0)",
-                ap.mask_version
+    /// The format that encodes the tables of a mask.
+    pub fn of(mask: &MaskVersion) -> Result<Self> {
+        let flavours = (
+            mask.resource_flavour("GroupAddressTable"),
+            mask.resource_flavour("GroupAssociationTable"),
+            mask.resource_flavour("GroupObjectTable"),
+        );
+        match flavours {
+            (
+                Some("AddressTable_Bcu1"),
+                Some("AssociationTable_M112"),
+                Some("GroupObjectTable_M112"),
+            ) => Ok(TableFormat::System7),
+            (
+                Some("AddressTable_SystemB"),
+                Some("AssociationTable_SystemB"),
+                Some("GroupObjectTable_SystemB"),
+            ) => Ok(TableFormat::SystemB),
+            (Some(address), Some(association), Some(object)) => bail!(
+                "mask {} ({}) uses tables knxcfg cannot encode: {address}, {association}, {object}",
+                mask.id,
+                mask.name
             ),
+            _ if mask.has_resource("GroupFilterTable") => bail!(
+                "mask {} ({}) is a coupler: it has a filter table instead of group tables, \
+                 and knxcfg cannot download couplers yet",
+                mask.id,
+                mask.name
+            ),
+            _ => bail!("mask {} ({}) has no group tables that knxcfg can use", mask.id, mask.name),
         }
     }
 }

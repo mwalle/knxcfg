@@ -71,25 +71,40 @@ pub struct DeviceConfiguration {
     pub links: Vec<Link>,
 }
 
+/// The masks the table code was written for and checked on. Other masks with
+/// the same table flavours work the same as far as the tables go.
+const TESTED_MASKS: [&str; 3] = ["MV-0701", "MV-0705", "MV-07B0"];
+
 /// Build the download image for a device from user values and links.
 pub fn build_device_image(
     ap: &ApplicationProgram,
+    format: TableFormat,
     values: &HashMap<String, String>,
     links: &[Link],
 ) -> Result<DeviceImage> {
-    build_device_image_eval(&Evaluation::new(ap, values), links)
+    build_device_image_eval(&Evaluation::new(ap, values), format, links)
 }
 
 /// Build the download image for an evaluated configuration.
-pub fn build_device_image_eval(ev: &Evaluation, links: &[Link]) -> Result<DeviceImage> {
+pub fn build_device_image_eval(
+    ev: &Evaluation,
+    format: TableFormat,
+    links: &[Link],
+) -> Result<DeviceImage> {
     let ap = ev.ap;
-    let format = TableFormat::of(ap)?;
     let static_ = ap
         .static_
         .as_ref()
         .ok_or_else(|| anyhow!("application program has no <Static>"))?;
     let mut image = build_parameter_image_eval(ev)?;
     let mut warnings = ev.warnings.clone();
+    if !TESTED_MASKS.contains(&ap.mask_version.as_str()) {
+        warnings.push(format!(
+            "mask {} has the same tables as a supported mask, but knxcfg was not tried on it; \
+             setup specific to its medium (RF, IP) is not covered",
+            ap.mask_version
+        ));
+    }
     if ap.is_secure_enabled == "true" {
         warnings.push(
             "the application supports KNX Data Secure, which knxcfg does not implement: \
@@ -761,10 +776,22 @@ mod tests {
     }
 
     #[test]
+    fn untested_masks_get_a_warning() {
+        let mut ap = system7_ap();
+        let warned = |ap: &ApplicationProgram| {
+            let image = build_device_image(ap, TableFormat::System7, &HashMap::new(), &[]).unwrap();
+            image.warnings.iter().any(|w| w.contains("was not tried"))
+        };
+        assert!(!warned(&ap));
+        ap.mask_version = "MV-5705".into();
+        assert!(warned(&ap));
+    }
+
+    #[test]
     fn system7_image_overlays_all_tables() {
         let ap = system7_ap();
         let links = vec![Link::new(0, 0x000A)];
-        let image = build_device_image(&ap, &HashMap::new(), &links).unwrap();
+        let image = build_device_image(&ap, TableFormat::System7, &HashMap::new(), &links).unwrap();
         let seg = |id| image.segments.iter().find(|s| s.id == id).unwrap();
         assert_eq!(&seg("AS-4000").data[0..5], &[0x02, 0x00, 0x00, 0x00, 0x0A]);
         assert_eq!(&seg("AS-4201").data[0..3], &[0x01, 0x01, 0x00]);
@@ -780,7 +807,7 @@ mod tests {
     #[test]
     fn links_to_inactive_objects_are_reported() {
         let ap = system7_ap();
-        let image = build_device_image(&ap, &HashMap::new(), &[Link::new(5, 1)]).unwrap();
+        let image = build_device_image(&ap, TableFormat::System7, &HashMap::new(), &[Link::new(5, 1)]).unwrap();
         assert!(image.links.is_empty());
         assert!(image.warnings.iter().any(|w| w.contains("group object 5")));
     }
@@ -788,7 +815,7 @@ mod tests {
     #[test]
     fn product_procedure_plan() {
         let ap = system7_ap();
-        let image = build_device_image(&ap, &HashMap::new(), &[]).unwrap();
+        let image = build_device_image(&ap, TableFormat::System7, &HashMap::new(), &[]).unwrap();
         let plan = download_plan(&Evaluation::new(&ap, &HashMap::new()), &image, None, DownloadKind::Full).unwrap();
         assert_eq!(plan.len(), 9);
         // RAM segment: allocated, no data (and no image segment needed).
@@ -812,7 +839,7 @@ mod tests {
         ap.static_.as_mut().unwrap().load_procedures.as_mut().unwrap().items[0]
             .steps
             .push(LoadStep::Other);
-        let image = build_device_image(&ap, &HashMap::new(), &[]).unwrap();
+        let image = build_device_image(&ap, TableFormat::System7, &HashMap::new(), &[]).unwrap();
         assert!(download_plan(&Evaluation::new(&ap, &HashMap::new()), &image, None, DownloadKind::Full).is_err());
     }
 
@@ -876,7 +903,7 @@ mod tests {
             }),
             ..Default::default()
         };
-        let image = build_device_image(&ap, &HashMap::new(), &[Link::new(1, 0x0801)]).unwrap();
+        let image = build_device_image(&ap, TableFormat::SystemB, &HashMap::new(), &[Link::new(1, 0x0801)]).unwrap();
         assert_eq!(image.address_table.bytes, [0x00, 0x01, 0x08, 0x01]);
         assert!(download_plan(&Evaluation::new(&ap, &HashMap::new()), &image, None, DownloadKind::Full).is_err());
         let plan = download_plan(&Evaluation::new(&ap, &HashMap::new()), &image, Some(&master), DownloadKind::Full).unwrap();
