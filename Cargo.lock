@@ -588,6 +588,7 @@ dependencies = [
  "knx-form",
  "knx-prod",
  "knx-proj",
+ "knx-sim",
  "knx-store",
  "knx-transport",
  "ratatui",

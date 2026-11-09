@@ -2,7 +2,7 @@
 //! it, so ETS and `knxcfg` can be run against the same simulation
 //! (`docs/sim-plan.md`).
 //!
-//! - [`knxip`] — KNXnet/IP frames
+//! - [`knxip`] — KNXnet/IP frames (from `knx-transport`)
 //! - [`server`] — the tunnelling server
 //! - [`bus`] — the simulated line and the frame log
 //! - [`device`] — simulated devices (management server)
@@ -13,8 +13,9 @@ use knx_transport::CemiFrame;
 
 pub mod bus;
 pub mod device;
-pub mod knxip;
 pub mod profile;
+
+pub use knx_transport::knxip;
 pub mod server;
 
 /// Parse an Individual Address `a.l.d`.

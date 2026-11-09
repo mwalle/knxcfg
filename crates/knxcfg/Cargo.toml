@@ -19,3 +19,6 @@ anyhow.workspace = true
 serde_yaml.workspace = true
 ratatui = "0.28"
 crossterm = "0.27"
+
+[dev-dependencies]
+knx-sim = { path = "../knx-sim" }

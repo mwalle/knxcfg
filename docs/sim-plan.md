@@ -91,9 +91,8 @@ can be built and tested against it while the USB path is blocked.
    ETS5 capture, so it is the first check: ETS downloads, the dump must
    contain the known table bytes, then compare the parameter image.
    **Done**, see "Step 2 results".
-3. Live download in `knxcfg` against the simulation; compare dumps. The
-   download plan is fixed (see "Step 3 results"); the KNXnet/IP transport
-   and the live executor are next.
+3. Live download in `knxcfg` against the simulation; compare dumps.
+   **Done**, see "Step 3 results".
 4. Coupler (mask 091A, the IP router of the real project): filter table and
    procedure. ETS might want to configure an IP router over IP instead of
    through the bus; to be found out.
@@ -197,7 +196,7 @@ GO0's config octet as 4Bh (communication off) although GO0 is linked to
 GA-1, while `docs/ets5-findings.md` and `oracle.rs` state 4Fh; resolved in
 step 3 (project state, see there).
 
-## Step 3 results (so far)
+## Step 3 results
 
 The three differences of step 2 are fixed in `knx-prod`:
 
@@ -223,6 +222,23 @@ Checked with a linked object: in the "knx-sim" project GO0 linked to 0/0/10
 (knxprod flags), ETS writes 4Fh, like knxcfg, and the dumps of the two
 downloads are equal again (tables included: address table length at 4000h
 and 0/0/10 at 4003h, association table at 4201h).
+
+**Live download in knxcfg.** `knx-transport::ip::IpTransport` is a KNXnet/IP
+tunnelling client (the frame code moved from knx-sim to
+`knx-transport::knxip`), and `knxcfg download <ia> --send -i <address>` runs
+the plan with `download::execute`: it checks the device descriptor against
+the application's mask before loading, compares `CompareProp` properties,
+expects the load state of every load event (`03_05_01 §4.23.2.4`, waiting out
+LoadCompleting), reads back every memory write, resolves objects named by
+type and `LdCtrlWriteRelMem` addresses. Coupler filter tables are not
+supported yet (step 4).
+
+Result: `knxcfg download 1.1.1 --send -i 192.168.77.1` of the imported
+"knx-sim" project (GO0 linked to 0/0/10) into a fresh simulated device:
+24 steps, 0.4 s, and the dump equals the one of ETS's live download.
+`download::live_tests` runs the same against knx-sim on localhost, and checks
+that a device with another hardware type stops the download before
+anything is loaded.
 
 ## Operating ETS
 

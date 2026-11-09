@@ -7,6 +7,8 @@
 //!
 //! - [`usb`] — KNX USB HID framing and [`usb::UsbTransport`]
 //! - [`hidraw`] — Linux `/dev/hidraw*` access and KNX interface discovery
+//! - [`knxip`] — KNXnet/IP frames (`03_08_02`, `03_08_04`)
+//! - [`ip`] — KNXnet/IP tunnelling client [`ip::IpTransport`]
 //! - [`mgmt`] — data link confirmations and the connection-oriented
 //!   Transport Layer used for device management
 
@@ -18,6 +20,8 @@ pub mod cemi;
 pub mod go_diag;
 #[cfg(target_os = "linux")]
 pub mod hidraw;
+pub mod ip;
+pub mod knxip;
 pub mod mgmt;
 pub mod usb;
 

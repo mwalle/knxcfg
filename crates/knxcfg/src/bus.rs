@@ -1,16 +1,20 @@
-//! Bus access commands over a KNX USB interface (M4).
+//! Bus access commands (M4).
 //!
-//! The interface is `--interface /dev/hidrawN`, or the only `hidraw` device
-//! whose report descriptor looks like a KNX USB Interface Device
-//! (`knx_transport::hidraw::is_knx_descriptor`).
+//! The interface is `--interface /dev/hidrawN`, a KNXnet/IP tunnelling
+//! server (`--interface 192.168.77.1` or `192.168.77.1:3671`), or the only
+//! `hidraw` device whose report descriptor looks like a KNX USB Interface
+//! Device (`knx_transport::hidraw::is_knx_descriptor`).
 
 use anyhow::{bail, Context, Result};
 use knx_core::IndividualAddress;
 use knx_prod::tables::Got7Entry;
 use knx_transport::go_diag::{self, GoConfig};
 use knx_transport::hidraw::{self, Hidraw};
+use knx_transport::ip::IpTransport;
 use knx_transport::mgmt::{self, Connection};
 use knx_transport::usb::UsbTransport;
+use knx_transport::Transport;
+use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -39,7 +43,7 @@ pub fn cmd_interfaces() -> Result<()> {
 pub fn cmd_device_info(interface: Option<&Path>, ia: &str) -> Result<()> {
     let ia = parse_ia(ia)?;
     let mut t = open(interface)?;
-    let mut c = Connection::open(&mut t, ia.to_u16())?;
+    let mut c = Connection::open(&mut *t, ia.to_u16())?;
     let mask = mgmt::device_descriptor_read(&mut c).context("reading the device descriptor")?;
     c.close()?;
     println!("{ia}: mask version {mask:04X}h");
@@ -51,7 +55,7 @@ pub fn cmd_mem_read(interface: Option<&Path>, ia: &str, address: &str, count: us
     let ia = parse_ia(ia)?;
     let address = parse_u16(address)?;
     let mut t = open(interface)?;
-    let mut c = Connection::open(&mut t, ia.to_u16())?;
+    let mut c = Connection::open(&mut *t, ia.to_u16())?;
     let data = mgmt::memory_read(&mut c, address, count)?;
     c.close()?;
     for (i, line) in data.chunks(16).enumerate() {
@@ -67,7 +71,7 @@ pub fn cmd_mem_read(interface: Option<&Path>, ia: &str, address: &str, count: us
 pub fn cmd_go_read(interface: Option<&Path>, ia: &str, object: u16) -> Result<()> {
     let ia = parse_ia(ia)?;
     let mut t = open(interface)?;
-    let mut c = Connection::open(&mut t, ia.to_u16())?;
+    let mut c = Connection::open(&mut *t, ia.to_u16())?;
     let idx = mgmt::find_object_index(&mut c, go_diag::OT_GROUP_OBJECT_TABLE)
         .context("looking for the Group Object Table object")?
         .ok_or_else(|| anyhow::anyhow!("{ia} has no Group Object Table interface object (System B and later only)"))?;
@@ -108,7 +112,7 @@ pub struct ObjectInfo {
 pub fn go_mem_read(interface: Option<&Path>, ia: IndividualAddress, object: u16, e: &Got7Entry, info: &ObjectInfo) -> Result<()> {
     let (octets, bits) = go_diag::value_field_size(e.value_type);
     let mut t = open(interface)?;
-    let mut c = Connection::open(&mut t, ia.to_u16())?;
+    let mut c = Connection::open(&mut *t, ia.to_u16())?;
     let value = mgmt::memory_read(&mut c, e.data_pointer, octets)
         .with_context(|| format!("reading the value at {:04X}h", e.data_pointer))?;
     let flags = mgmt::memory_read(&mut c, e.ram_flags, 1)
@@ -198,8 +202,8 @@ pub fn cmd_prog_ia(interface: Option<&Path>, ia: &str, serial: Option<&str>, wai
     let serial = serial.map(parse_serial).transpose()?;
     let mut t = open(interface)?;
     let r = match &serial {
-        Some(sn) => mgmt::individual_address_serial_write(&mut t, sn, ia.to_u16())?,
-        None => mgmt::individual_address_write(&mut t, ia.to_u16(), wait, &mut |m| eprintln!("{m}"))?,
+        Some(sn) => mgmt::individual_address_serial_write(&mut *t, sn, ia.to_u16())?,
+        None => mgmt::individual_address_write(&mut *t, ia.to_u16(), wait, &mut |m| eprintln!("{m}"))?,
     };
     let previous = format_ia(r.previous);
     match (&serial, r.mask) {
@@ -211,7 +215,23 @@ pub fn cmd_prog_ia(interface: Option<&Path>, ia: &str, serial: Option<&str>, wai
     Ok(())
 }
 
-fn open(interface: Option<&Path>) -> Result<UsbTransport<Hidraw>> {
+/// Open the bus interface: a KNXnet/IP tunnelling server if `interface` is an
+/// IPv4 address (port 3671 unless given), else a KNX USB interface.
+pub fn open(interface: Option<&Path>) -> Result<Box<dyn Transport>> {
+    if let Some(s) = interface.and_then(Path::to_str) {
+        let server = s
+            .parse::<SocketAddrV4>()
+            .ok()
+            .or_else(|| s.parse::<Ipv4Addr>().ok().map(|ip| SocketAddrV4::new(ip, 3671)));
+        if let Some(server) = server {
+            let t = IpTransport::connect(server).with_context(|| format!("KNXnet/IP {server}"))?;
+            return Ok(Box::new(t));
+        }
+    }
+    Ok(Box::new(open_usb(interface)?))
+}
+
+fn open_usb(interface: Option<&Path>) -> Result<UsbTransport<Hidraw>> {
     let path = match interface {
         Some(p) => p.to_path_buf(),
         None => find_interface()?,

@@ -116,6 +116,11 @@ impl Server {
         })
     }
 
+    /// The control and data endpoint (useful when bound to port 0).
+    pub fn local_addr(&self) -> SocketAddrV4 {
+        self.control.0
+    }
+
     /// Start the thread that receives search requests on the multicast
     /// address and passes them to `tx`.
     pub fn spawn_multicast(listen: Ipv4Addr, tx: Sender<Input>) -> Result<()> {

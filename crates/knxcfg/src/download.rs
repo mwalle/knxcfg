@@ -7,16 +7,20 @@
 //! `knx-prod` (commissioning) and `knx-transport` (protocol) both stay below
 //! the orchestrator — see `docs/plan.md` §4.
 //!
-//! The result is the request side of the conversation only. Steps whose
-//! frames depend on a device response cannot be pre-encoded and are reported
-//! as errors: `LdCtrlWriteRelMem` needs the object's `PID_TABLE_REFERENCE`,
-//! and steps that name an interface object by type (couplers) need its index.
+//! [`plan_to_frames`] gives the request side of the conversation only. Steps
+//! whose frames depend on a device response cannot be pre-encoded and are
+//! reported as errors: `LdCtrlWriteRelMem` needs the object's
+//! `PID_TABLE_REFERENCE`, and steps that name an interface object by type
+//! (couplers) need its index. [`execute`] runs a plan over a live connection
+//! and checks the device's answers.
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 use knx_prod::{DownloadStep, Object};
 use knx_transport::apdu::{self, apci};
 use knx_transport::cemi::{self, tpci};
-use knx_transport::CemiFrame;
+use knx_transport::mgmt::{self, Connection};
+use knx_transport::{CemiFrame, Transport};
+use std::time::{Duration, Instant};
 
 /// Data octets per `A_Memory_Write` in a standard frame: 15 TPDU octets
 /// after the TPCI octet, minus APCI and address (`03_03_07 §3.5.4`).
@@ -185,6 +189,226 @@ fn load_event(lsm_idx: u8, event: &[u8]) -> Vec<u8> {
     apdu::property_value_write(lsm_idx, apci::PID_LOAD_STATE_CONTROL, 1, 1, &d)
 }
 
+/// `A_PropertyValue_Response` (`03_03_07 §3.4.3.2`).
+const PROPERTY_VALUE_RESPONSE: u16 = 0x3D6;
+const PID_OBJECT_TYPE: u8 = 1;
+const PID_TABLE_REFERENCE: u8 = 7;
+
+/// Load states (`03_05_01 Table 92`).
+const UNLOADED: u8 = 0;
+const LOADED: u8 = 1;
+const LOADING: u8 = 2;
+const LOAD_COMPLETING: u8 = 5;
+/// Longest a load state transition may take (`03_05_01 §4.23.2.1`).
+const LOAD_STATE_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Run a download plan over `t` to the device `dst` and check every answer:
+/// the device descriptor must be `mask` before anything is loaded, property
+/// comparisons must match, each load event must reach the state the load
+/// procedure expects (`03_05_01 §4.23.2.4`), and every memory write is read
+/// back, as ETS does for a device without `PID_DEVICE_CONTROL`. `log` gets a
+/// line per step.
+pub fn execute(t: &mut dyn Transport, plan: &[DownloadStep], dst: u16, mask: u16, log: &mut dyn FnMut(&str)) -> Result<()> {
+    let Some((DownloadStep::Connect, rest)) = plan.split_first() else {
+        bail!("the download plan does not start with Connect");
+    };
+    let mut c = Connection::open(t, dst).context("step 1: connect")?;
+    let found = mgmt::device_descriptor_read(&mut c).context("step 1: device descriptor")?;
+    if found != mask {
+        bail!("the device has mask {found:04X}h, the application needs {mask:04X}h; nothing was loaded");
+    }
+    log(&format!("  1 connected, mask {found:04X}h"));
+    for (i, step) in rest.iter().enumerate() {
+        let n = i + 2;
+        // The connection ends with Disconnect or Restart; only delays may
+        // follow.
+        let finished = || rest[i + 1..].iter().all(|s| matches!(s, DownloadStep::Disconnect | DownloadStep::Delay { .. }));
+        match step {
+            DownloadStep::Disconnect | DownloadStep::Restart if !finished() => {
+                bail!("step {n}: steps after the end of the connection are not supported")
+            }
+            DownloadStep::Disconnect => {
+                c.close()?;
+                log(&format!("{n:3} disconnected"));
+                return Ok(());
+            }
+            DownloadStep::Restart => {
+                c.restart_and_abort().with_context(|| format!("step {n}: restart"))?;
+                log(&format!("{n:3} restart"));
+                return Ok(());
+            }
+            DownloadStep::Connect => bail!("step {n}: a second Connect is not supported"),
+            _ => run_step(&mut c, n, step, log).with_context(|| format!("step {n} ({})", step_name(step)))?,
+        }
+    }
+    c.close()
+}
+
+fn run_step(c: &mut Connection, n: usize, step: &DownloadStep, log: &mut dyn FnMut(&str)) -> Result<()> {
+    match step {
+        DownloadStep::CompareProp { obj_idx, prop_id, inline_data } => {
+            let found = property_read(c, *obj_idx, *prop_id)?;
+            // The inline data may be longer than the property (BE-02001.02:
+            // 10 octets for the 6-octet hardware type).
+            let len = found.len().min(inline_data.len());
+            if found.is_empty() || found[..len] != inline_data[..len] {
+                bail!(
+                    "object {obj_idx} property {prop_id} is {}, the application expects {} (wrong device?)",
+                    hex(&found),
+                    hex(inline_data)
+                );
+            }
+            log(&format!("{n:3} object {obj_idx} property {prop_id} = {} ok", hex(&found)));
+        }
+        DownloadStep::ReadProp { obj_idx, prop_id } => {
+            let v = property_read(c, *obj_idx, *prop_id)?;
+            log(&format!("{n:3} object {obj_idx} property {prop_id} = {}", hex(&v)));
+        }
+        DownloadStep::WriteProp { object, prop_id, data, verify } => {
+            let idx = object_index(c, object)?;
+            let back = property_write(c, idx, *prop_id, data)?;
+            if *verify && back != *data {
+                bail!("object {idx} property {prop_id}: wrote {}, read {}", hex(data), hex(&back));
+            }
+            log(&format!("{n:3} object {idx} property {prop_id} := {}", hex(data)));
+        }
+        DownloadStep::Unload { object } => load(c, n, object, &[0x04], UNLOADED, log)?,
+        DownloadStep::Load { object } => load(c, n, object, &[0x01], LOADING, log)?,
+        DownloadStep::LoadCompleted { object } => load(c, n, object, &[0x02], LOADED, log)?,
+        DownloadStep::AbsSegment { lsm_idx, seg_type, address, size, access, mem_type, seg_flags, data } => {
+            let [a0, a1] = (*address as u16).to_be_bytes();
+            let [l0, l1] = (*size as u16).to_be_bytes();
+            let event = [0x03, *seg_type, a0, a1, l0, l1, *access, *mem_type, *seg_flags];
+            load(c, n, &Object::Index(*lsm_idx), &event, LOADING, log)?;
+            write_memory(c, *address as u16, data)?;
+            if !data.is_empty() {
+                log(&format!("{n:3} memory {address:04X}h: {} octet(s) written and read back", data.len()));
+            }
+        }
+        DownloadStep::TaskSegment { lsm_idx, address, pei_type, app_id } => {
+            let [a0, a1] = (*address as u16).to_be_bytes();
+            let mut event = vec![0x03, 0x02, a0, a1, *pei_type];
+            event.extend_from_slice(app_id);
+            load(c, n, &Object::Index(*lsm_idx), &event, LOADING, log)?;
+        }
+        DownloadStep::RelSegment { lsm_idx, size, mode, fill } => {
+            let mut event = vec![0x03, 0x0B];
+            event.extend_from_slice(&size.to_be_bytes());
+            event.extend_from_slice(&[*mode, *fill]);
+            load(c, n, &Object::Index(*lsm_idx), &event, LOADING, log)?;
+        }
+        DownloadStep::WriteMem { address, data, .. } => {
+            write_memory(c, *address, data)?;
+            log(&format!("{n:3} memory {address:04X}h: {} octet(s) written and read back", data.len()));
+        }
+        DownloadStep::WriteRelMem { obj_idx, offset, data, .. } => {
+            let reference = property_read(c, *obj_idx, PID_TABLE_REFERENCE)?;
+            let base = reference.iter().fold(0u64, |a, b| a << 8 | *b as u64);
+            let address = base + *offset as u64;
+            if reference.is_empty() || address + data.len() as u64 > 0x1_0000 {
+                bail!("object {obj_idx}: table reference {} + {offset} is not a 16-bit address", hex(&reference));
+            }
+            write_memory(c, address as u16, data)?;
+            log(&format!("{n:3} memory {address:04X}h (object {obj_idx} + {offset}): {} octet(s)", data.len()));
+        }
+        DownloadStep::WriteFilterTable { .. } | DownloadStep::ClearFilterTable { .. } => {
+            bail!("coupler filter tables are not supported in a live download yet")
+        }
+        DownloadStep::Delay { ms } => std::thread::sleep(Duration::from_millis(*ms as u64)),
+        DownloadStep::MapError { .. } => {}
+        DownloadStep::Connect | DownloadStep::Disconnect | DownloadStep::Restart => unreachable!("handled by execute"),
+    }
+    Ok(())
+}
+
+fn step_name(step: &DownloadStep) -> String {
+    let s = format!("{step:?}");
+    s.split([' ', '{', '(']).next().unwrap_or_default().to_string()
+}
+
+/// `A_PropertyValue_Read` of one element at index 1; the value, empty for
+/// an error answer.
+fn property_read(c: &mut Connection, obj: u8, pid: u8) -> Result<Vec<u8>> {
+    let resp = c.request(&apdu::property_value_read(obj, pid, 1, 1), PROPERTY_VALUE_RESPONSE)?;
+    property_value(&resp, obj, pid)
+}
+
+/// `A_PropertyValue_Write` of one element at index 1; the value the device
+/// answers with. An error answer is an error.
+fn property_write(c: &mut Connection, obj: u8, pid: u8, data: &[u8]) -> Result<Vec<u8>> {
+    let resp = c.request(&apdu::property_value_write(obj, pid, 1, 1, data), PROPERTY_VALUE_RESPONSE)?;
+    let v = property_value(&resp, obj, pid)?;
+    if resp[4] >> 4 == 0 {
+        bail!("object {obj} property {pid}: the device refused the write");
+    }
+    Ok(v)
+}
+
+fn property_value(resp: &[u8], obj: u8, pid: u8) -> Result<Vec<u8>> {
+    if apdu::apci_of(resp) != Some(PROPERTY_VALUE_RESPONSE) || resp.len() < 6 || resp[2] != obj || resp[3] != pid {
+        bail!("unexpected answer to a property access of object {obj} property {pid}: {}", hex(resp));
+    }
+    Ok(resp[6..].to_vec())
+}
+
+/// The index of an interface object named by type: the first object whose
+/// `PID_OBJECT_TYPE` matches.
+fn object_index(c: &mut Connection, object: &Object) -> Result<u8> {
+    let kind = match object {
+        Object::Index(i) => return Ok(*i),
+        Object::Type(t) => *t,
+    };
+    for idx in 0..=u8::MAX {
+        let v = property_read(c, idx, PID_OBJECT_TYPE)?;
+        if v.is_empty() {
+            break;
+        }
+        if v.iter().fold(0u32, |a, b| a << 8 | *b as u32) == kind as u32 {
+            return Ok(idx);
+        }
+    }
+    bail!("the device has no interface object of type {kind}")
+}
+
+/// A load event and the state it must lead to; `LoadCompleting` is waited
+/// out by reading the state (`03_05_01 §4.23.2.4`).
+fn load(c: &mut Connection, n: usize, object: &Object, event: &[u8], want: u8, log: &mut dyn FnMut(&str)) -> Result<()> {
+    let idx = object_index(c, object)?;
+    let mut d = event.to_vec();
+    d.resize(LOAD_EVENT_LEN, 0);
+    let mut state = *property_write(c, idx, apci::PID_LOAD_STATE_CONTROL, &d)?.first().unwrap_or(&0xFF);
+    let deadline = Instant::now() + LOAD_STATE_TIMEOUT;
+    while state == LOAD_COMPLETING && want == LOADED && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(500));
+        state = *property_read(c, idx, apci::PID_LOAD_STATE_CONTROL)?.first().unwrap_or(&0xFF);
+    }
+    if state != want {
+        bail!("object {idx}: load event {} gave load state {state}, expected {want}", hex(event));
+    }
+    log(&format!("{n:3} object {idx} load event {} -> state {state}", hex(event)));
+    Ok(())
+}
+
+/// `A_Memory_Write` in standard-frame chunks, each read back and compared.
+fn write_memory(c: &mut Connection, address: u16, data: &[u8]) -> Result<()> {
+    if address as usize + data.len() > 0x1_0000 {
+        bail!("write at {address:04X}h+{} goes above 64 KiB", data.len());
+    }
+    for (k, chunk) in data.chunks(MEMORY_WRITE_CHUNK).enumerate() {
+        let at = address + (k * MEMORY_WRITE_CHUNK) as u16;
+        c.send(&apdu::memory_write(at, chunk))?;
+        let back = mgmt::memory_read(c, at, chunk.len())?;
+        if back != chunk {
+            bail!("memory {at:04X}h: wrote {}, read back {}", hex(chunk), hex(&back));
+        }
+    }
+    Ok(())
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +510,84 @@ mod tests {
         let t = tpdu(&frames[0]);
         assert_eq!(t[0] & 0x03, 0x02); // APCI bits 9..8, behind the TPCI
         assert_eq!(&t[1..], &[0xC7, 1, 56, 0x00, 0x01]);
+    }
+}
+
+/// [`execute`] against knx-sim's simulated BE-02001.02 over KNXnet/IP on
+/// localhost.
+#[cfg(test)]
+mod live_tests {
+    use super::*;
+    use knx_sim::bus::{Bus, Log};
+    use knx_sim::device::{load_state, Device};
+    use knx_sim::knxip::Description;
+    use knx_sim::server::{Input, Server};
+    use knx_transport::ip::IpTransport;
+    use std::collections::HashMap;
+    use std::path::PathBuf;
+
+    const H2P: &str = "M-0083_H-182-0_HP-00B6-32-9642";
+
+    fn knxprod() -> Option<PathBuf> {
+        let p = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../refs/knxprod/MDT_KP_BE_02_Universal_Interface_V32a.knxprod");
+        p.is_file().then_some(p)
+    }
+
+    /// The default download of the BE-02001.02 with one link.
+    fn plan(path: &PathBuf) -> Vec<DownloadStep> {
+        let kp = knx_prod::KnxProd::open(path).unwrap();
+        let ap = kp.application_program(H2P).unwrap();
+        let values = HashMap::new();
+        let ev = knx_prod::Evaluation::new(&ap, &values);
+        let links = [knx_prod::tables::Link::new(0, 0x000A)];
+        let image = knx_prod::device_image::build_device_image_eval(&ev, kp.table_format(&ap).unwrap(), &links).unwrap();
+        knx_prod::download_plan(&ev, &image, None, knx_prod::DownloadKind::Full).unwrap()
+    }
+
+    /// Run `plan` against `dev`; the result and the device afterwards.
+    fn run(dev: Device, plan: &[DownloadStep]) -> (Result<()>, Device) {
+        let desc = Description { individual_address: 0x11FA, serial: [0; 6], mac: [0; 6], name: "t".into() };
+        let mut server = Server::new("127.0.0.1:0".parse().unwrap(), desc, 0x11FB, Bus::new(vec![dev], Log::to_file(None))).unwrap();
+        let addr = server.local_addr();
+        let (tx, rx) = std::sync::mpsc::channel();
+        let t = std::thread::spawn(move || {
+            server.run(rx).unwrap();
+            server
+        });
+        let result = {
+            let mut ip = IpTransport::connect(addr).unwrap();
+            execute(&mut ip, plan, 0x1101, 0x0705, &mut |_| {})
+        };
+        tx.send(Input::Command("quit".into())).unwrap();
+        let mut server = t.join().unwrap();
+        (result, server.bus.devices.remove(0))
+    }
+
+    #[test]
+    fn download_into_simulated_device() {
+        let Some(path) = knxprod() else { return };
+        let dev = knx_sim::profile::device(&path, H2P, 0x1101).unwrap();
+        let (result, dev) = run(dev, &plan(&path));
+        result.unwrap();
+        let dump = dev.dump();
+        for lsm in 1..=3 {
+            assert_eq!(dev.objects[lsm].lsm.as_ref().unwrap().state, load_state::LOADED, "{dump}");
+        }
+        assert!(dump.contains("  run state running\n"), "{dump}");
+        assert!(dump.contains("  pid 13: 00 83 00 B6 32\n"), "{dump}");
+        assert!(dump.contains("  4000: 02 -- -- 00 0A --"), "{dump}");
+        assert!(dump.contains("  4200: -- 01 01 00 --"), "{dump}");
+    }
+
+    #[test]
+    fn wrong_hardware_type_loads_nothing() {
+        let Some(path) = knxprod() else { return };
+        let mut dev = knx_sim::profile::device(&path, H2P, 0x1101).unwrap();
+        dev.set_property(0, 78, &[0, 0, 0, 0, 0x02, 0xAD]);
+        let (result, dev) = run(dev, &plan(&path));
+        let err = format!("{:#}", result.unwrap_err());
+        assert!(err.contains("wrong device"), "{err}");
+        assert!(!dev.dump().contains("memory written\n  "), "{}", dev.dump());
+        assert_eq!(dev.objects[3].lsm.as_ref().unwrap().state, load_state::UNLOADED);
     }
 }

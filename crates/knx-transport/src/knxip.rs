@@ -1,5 +1,6 @@
-//! KNXnet/IP frames for the tunnelling server (`03_08_02 Core`,
-//! `03_08_03 Management`, `03_08_04 Tunnelling`).
+//! KNXnet/IP frames (`03_08_02 Core`, `03_08_03 Management`,
+//! `03_08_04 Tunnelling`), for the tunnelling client ([`crate::ip`]) and
+//! knx-sim's server.
 //!
 //! Every frame starts with the 6-octet header (`03_08_02 §7.1`):
 //!
@@ -201,6 +202,21 @@ pub fn connect_response(channel: u8, status: u8, data: Option<(Hpai, &[u8])>) ->
         body.extend_from_slice(crd);
     }
     frame(service::CONNECT_RESPONSE, &body)
+}
+
+/// CONNECT_REQUEST for a tunnel on the data link layer (basic CRI,
+/// `03_08_04 §5.4.3.1`).
+pub fn connect_request_tunnel(control: Hpai, data: Hpai) -> Vec<u8> {
+    let mut body = control.encode().to_vec();
+    body.extend_from_slice(&data.encode());
+    body.extend_from_slice(&[4, TUNNEL_CONNECTION, TUNNEL_LINKLAYER, 0]);
+    frame(service::CONNECT_REQUEST, &body)
+}
+
+pub fn connectionstate_request(channel: u8, control: Hpai) -> Vec<u8> {
+    let mut body = vec![channel, 0];
+    body.extend_from_slice(&control.encode());
+    frame(service::CONNECTIONSTATE_REQUEST, &body)
 }
 
 pub fn connectionstate_response(channel: u8, status: u8) -> Vec<u8> {

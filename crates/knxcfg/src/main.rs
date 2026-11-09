@@ -147,7 +147,7 @@ enum Cmd {
         #[arg(long)]
         force: bool,
     },
-    /// Build and (M4: send) the download image for a device (M5 dry run)
+    /// Build the download for a device and, with --send, load it
     Download {
         /// Individual address, e.g. 1.1.1
         ia: String,
@@ -160,6 +160,12 @@ enum Cmd {
         /// Parameters only (partial download; MergedProcedure applications)
         #[arg(long)]
         partial: bool,
+        /// Send the download to the device (otherwise a dry run)
+        #[arg(long)]
+        send: bool,
+        /// Interface: /dev/hidrawN or a KNXnet/IP server address (default: the only KNX USB interface)
+        #[arg(short, long)]
+        interface: Option<PathBuf>,
     },
     /// List the hidraw devices; KNX USB interfaces are marked
     Interfaces,
@@ -167,7 +173,7 @@ enum Cmd {
     DeviceInfo {
         /// Individual address, e.g. 1.1.1
         ia: String,
-        /// USB interface (defaults to the only KNX one)
+        /// Interface: /dev/hidrawN or a KNXnet/IP server address (default: the only KNX USB interface)
         #[arg(short, long)]
         interface: Option<PathBuf>,
     },
@@ -182,7 +188,7 @@ enum Cmd {
         /// Seconds to wait for a device in programming mode
         #[arg(long, default_value_t = 60)]
         wait: u64,
-        /// USB interface (defaults to the only KNX one)
+        /// Interface: /dev/hidrawN or a KNXnet/IP server address (default: the only KNX USB interface)
         #[arg(short, long)]
         interface: Option<PathBuf>,
     },
@@ -194,7 +200,7 @@ enum Cmd {
         address: String,
         /// Number of octets
         count: usize,
-        /// USB interface (defaults to the only KNX one)
+        /// Interface: /dev/hidrawN or a KNXnet/IP server address (default: the only KNX USB interface)
         #[arg(short, long)]
         interface: Option<PathBuf>,
     },
@@ -316,9 +322,10 @@ fn main() -> Result<()> {
         Cmd::Import { file, force } => {
             cmd_import(&resolve_project(project.as_deref())?, &file, force)
         }
-        Cmd::Download { ia, knxprod, frames, partial } => {
+        Cmd::Download { ia, knxprod, frames, partial, send, interface } => {
             let dir = resolve_project(project.as_deref())?;
-            cmd_download(&dir, &ia, knxprod.as_deref(), frames, partial)
+            let send = send.then_some(interface.as_deref());
+            cmd_download(&dir, &ia, knxprod.as_deref(), frames, partial, send)
         }
         Cmd::Interfaces => bus::cmd_interfaces(),
         Cmd::DeviceInfo { ia, interface } => bus::cmd_device_info(interface.as_deref(), &ia),
@@ -869,6 +876,7 @@ fn cmd_download(
     knxprod_override: Option<&Path>,
     show_frames: bool,
     partial: bool,
+    send: Option<Option<&Path>>,
 ) -> Result<()> {
     let ia: IndividualAddress = ia_str.parse().with_context(|| format!("invalid IA {ia_str}"))?;
     let project = knx_store::load(dir)?;
@@ -991,7 +999,22 @@ fn cmd_download(
         }
     }
 
-    println!("\n(not sent — USB cEMI transport is not implemented yet)");
+    let Some(interface) = send else {
+        println!("\n(dry run: not sent; --send loads it into the device)");
+        return Ok(());
+    };
+    if diffs != 0 {
+        bail!("not sent: the image does not decode to the configuration");
+    }
+    let mask = ap
+        .mask_version
+        .strip_prefix("MV-")
+        .and_then(|m| u16::from_str_radix(m, 16).ok())
+        .with_context(|| format!("bad mask version {:?}", ap.mask_version))?;
+    println!("\nSending to {ia}:");
+    let mut t = bus::open(interface)?;
+    download::execute(&mut *t, &plan, ia.to_u16(), mask, &mut |line| println!("{line}"))?;
+    println!("{ia}: download complete");
     Ok(())
 }
 

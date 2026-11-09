@@ -68,7 +68,9 @@ D14 product store: project `vendor/` (default) + global
 - `knx-transport` — `CemiFrame`, `cemi::l_data_req` (TPCI and APCI share
   the first TPDU octet), `apdu::*` (`A_Memory_Read/Write`,
   `A_PropertyValue_Read/Write` with 12-bit start index, `A_Restart`, …),
-  `Transport` trait, and (M4):
+  `Transport` trait, `knxip` (KNXnet/IP frames, shared with knx-sim), `ip`
+  (KNXnet/IP tunnelling client: connect, TUNNELLING_REQUEST/ACK with one
+  repetition, sequence rules, heartbeat, disconnect), and (M4):
   - `usb` — KNX USB HID framing (`09_03 §3.4`: report ID 01h, sequence
     number/packet type, 8-octet transfer header in the start packet, up to
     5 reports, reassembly with the spec's error handling), Device Feature
@@ -122,14 +124,16 @@ knxcfg edit <ia> [--knxprod <file>]            # TUI: Tab=pages, Enter=edit, s=s
 knxcfg probe <h2p> | form <h2p> | memory <h2p> | tables <h2p>   [--knxprod <file>]
 knxcfg import <file.knxproj> [--force]         # into this project; unpacks missing product data to vendor/
 knxcfg download <ia> [--knxprod F] [--partial] [--frames]   # dry run: image, tables, plan
+knxcfg download <ia> --send [-i ...]           # load it into the device (checks every answer)
 knxcfg interfaces                              # hidraw devices, KNX USB interfaces marked
-knxcfg device-info <ia> [-i /dev/hidrawN]      # mask version (DD0) over the bus
+knxcfg device-info <ia> [-i /dev/hidrawN|IP]   # mask version (DD0) over the bus
 knxcfg mem-read <ia> <addr> <count> [-i ...]   # hex dump; addr 0x4000 / 4000h / decimal
 knxcfg prog-ia <ia> [--serial SN] [--wait S] [-i ...]  # assign IA: programming mode, or by serial (0083:12345678)
 knxcfg go-read <ia> <object> [-i ...]          # GO value/status/config via PID_GO_DIAGNOSTICS (optional in devices)
 knxcfg go-mem-read <ia> <object> [-i ...]      # System 7: GO value + RAM flags at the knxprod's data pointer
 ```
-Bus commands use `--interface` or the only KNX `hidraw` device. `/dev/hidraw*`
+Bus commands use `--interface` (a `/dev/hidrawN` path or a KNXnet/IP server
+address, `192.168.77.1[:3671]`) or the only KNX `hidraw` device. `/dev/hidraw*`
 is root-only by default; a udev rule (`SUBSYSTEM=="hidraw",
 ATTRS{idVendor}=="<vid>", TAG+="uaccess"`) gives the logged-in user access.
 knxprod files are resolved by h2p: `--knxprod` override → the path recorded at
@@ -168,7 +172,11 @@ the legacy procedures (`LcSlave`, `LdCtrlSetControlVariable`), couplers with
 3.5 KiB tables (0900h–0911h) and Coupler Model 2.0 (2920h). Never compared with
 an ETS download; how ETS chooses the addresses (e.g. pass-through flags) is not
 in the spec.
-**M4** (USB transport, in progress): USB HID framing, `hidraw`, the EMI
+**M4** (bus access, in progress): live downloads work over KNXnet/IP
+(`download --send -i <address>`, `download::execute`: device descriptor
+check, `CompareProp`, load states checked per event, every memory write read
+back, `LdCtrlWriteRelMem` through `PID_TABLE_REFERENCE`, objects named by
+type; not yet coupler filter tables), tested against knx-sim. USB: HID framing, `hidraw`, the EMI
 handshake, the TL connection and DD0/memory reads are implemented and
 tested against scripted mocks. Hardware runs (knx-usb interface, own
 firmware in `knx-core/standalone/knx-usb`, 2026-11-04): Device Feature
@@ -176,9 +184,8 @@ handshake and `PID_COMM_MODE` write confirmed; no `L_Data.con` for any
 `L_Data.req` (`T_Connect` to 1.1.1, several Ctrl1/source variants), no bus
 traffic while listening, and `knx-usb-cli mem 1.1.1` got no reply either —
 the TP1 side of the interface (or the absence of a device at 1.1.1) is the
-open question, not the USB framing. Still to do: a working hardware run,
-`A_PropertyValue_Read/Write` responses,
-executing a download plan (incl. `LdCtrlWriteRelMem`).
+open question, not the USB framing. Still to do: a working USB hardware run,
+a live download to real hardware.
 **M2** (`.knxproj` import, in progress): topology, group addresses, parameters
 and links are imported, and re-importing gives byte-identical files. Checked on
 three real projects in `refs/knxproj`: two ETS 5.0 ones (all 78 group object refs
@@ -192,12 +199,11 @@ Still to do for M2: per-object flag/priority overrides (reported at import,
 not yet applied to the tables), confirming that the first `Links` entry is the
 sending address, and keeping the data listed under "Not imported" in
 `docs/knxproj-format.md`, which M3 needs (D7 Buildings/Functions).
-**knx-sim** (`docs/sim-plan.md`, in progress): steps 1 and 2 done, step 3
-started: knxcfg's download of the BE-02001.02 now gives the same dump as
-ETS's (default configuration, live ETS download; the captured download of a
-configured project differs only in GO0's communication flag, see the plan).
-`tools/vm.py` operates ETS in the VM.
-Next: **knx-sim** step 3 (KNXnet/IP transport and live download in knxcfg) · finish **M2** ·
+**knx-sim** (`docs/sim-plan.md`, in progress): steps 1–3 done. knxcfg's live
+download of the BE-02001.02 over KNXnet/IP gives the same device state as
+ETS's live download (with a link and without). `tools/vm.py` operates ETS in
+the VM.
+Next: **knx-sim** step 4 (coupler) or 5 (System B, partial download) · finish **M2** ·
 finish **M4** · **M3** `.knxproj` export · **M6** hardening.
 
 ## Known loose ends
