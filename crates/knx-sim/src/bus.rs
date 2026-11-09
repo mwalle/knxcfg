@@ -12,17 +12,26 @@ use std::time::Instant;
 pub struct Log {
     start: Instant,
     file: Option<File>,
+    stdout: bool,
 }
 
 impl Log {
+    /// Log to stdout and, if given, to `file`.
     pub fn new(file: Option<File>) -> Self {
-        Log { start: Instant::now(), file }
+        Log { start: Instant::now(), file, stdout: true }
+    }
+
+    /// Log only to `file` (or nowhere).
+    pub fn to_file(file: Option<File>) -> Self {
+        Log { start: Instant::now(), file, stdout: false }
     }
 
     pub fn line(&mut self, text: &str) {
         let t = self.start.elapsed();
         let line = format!("{:5}.{:03} {text}", t.as_secs(), t.subsec_millis());
-        println!("{line}");
+        if self.stdout {
+            println!("{line}");
+        }
         if let Some(f) = self.file.as_mut() {
             let _ = writeln!(f, "{line}");
         }

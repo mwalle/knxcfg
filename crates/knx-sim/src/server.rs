@@ -496,8 +496,18 @@ impl Server {
                     println!("channel {} {:?} data {}", c.channel, c.kind, c.data);
                 }
             }
+            ["dump", rest @ ..] => {
+                let text: String = self.bus.devices.iter().map(Device::dump).collect();
+                match rest {
+                    [path] => match std::fs::write(path, &text) {
+                        Ok(()) => self.bus.log.line(&format!("cmd     dump written to {path}")),
+                        Err(e) => println!("{path}: {e}"),
+                    },
+                    _ => print!("{text}"),
+                }
+            }
             [] => {}
-            _ => println!("commands: prog <ia> [on|off], devices, quit"),
+            _ => println!("commands: prog <ia> [on|off], devices, dump [file], quit"),
         }
         true
     }

@@ -11,18 +11,28 @@ use knx_transport::cemi::{tpci, LData};
 
 /// Property datatypes (`03_07_03 §4`).
 pub mod pdt {
+    pub const CONTROL: u8 = 0x00;
     pub const UNSIGNED_CHAR: u8 = 0x02;
     pub const UNSIGNED_INT: u8 = 0x04;
     pub const GENERIC_02: u8 = 0x12;
+    pub const GENERIC_05: u8 = 0x15;
     pub const GENERIC_06: u8 = 0x16;
+    pub const GENERIC_08: u8 = 0x18;
     pub const GENERIC_10: u8 = 0x1A;
     pub const VERSION: u8 = 0x30;
     pub const BITSET8: u8 = 0x33;
 }
 
-/// Property identifiers of the device object (`03_07_03 §4.2`).
+/// Property identifiers (`03_07_03 §4.2`).
 pub mod pid {
     pub const OBJECT_TYPE: u8 = 1;
+    pub const LOAD_STATE_CONTROL: u8 = 5;
+    pub const RUN_STATE_CONTROL: u8 = 6;
+    pub const TABLE_REFERENCE: u8 = 7;
+    pub const PROGRAM_VERSION: u8 = 13;
+    /// Download stamp of objects 1–4 (`Stamp_SystemB` resources of mask
+    /// 0705h in `knx_master.xml`).
+    pub const STAMP: u8 = 27;
     pub const SERIAL_NUMBER: u8 = 11;
     pub const MANUFACTURER_ID: u8 = 12;
     pub const DEVICE_CONTROL: u8 = 14;
@@ -73,12 +83,85 @@ impl Property {
 
 #[derive(Debug, Clone)]
 pub struct Object {
+    /// Interface object type (PID_OBJECT_TYPE).
+    pub kind: u16,
     pub properties: Vec<Property>,
+    /// Load state machine, for objects of loadable parts.
+    pub lsm: Option<Lsm>,
 }
 
 impl Object {
+    pub fn new(kind: u16) -> Self {
+        Object {
+            kind,
+            properties: vec![Property::new(pid::OBJECT_TYPE, pdt::UNSIGNED_INT, 2, &kind.to_be_bytes())],
+            lsm: None,
+        }
+    }
+
     fn property(&mut self, id: u8) -> Option<&mut Property> {
         self.properties.iter_mut().find(|p| p.id == id)
+    }
+
+    fn set(&mut self, id: u8, value: &[u8]) {
+        if let Some(p) = self.property(id) {
+            p.elements = vec![value.to_vec()];
+        }
+    }
+}
+
+/// Load states (`03_05_01 Table 92`).
+pub mod load_state {
+    pub const UNLOADED: u8 = 0;
+    pub const LOADED: u8 = 1;
+    pub const LOADING: u8 = 2;
+    pub const ERROR: u8 = 3;
+    pub const UNLOADING: u8 = 4;
+    pub const LOAD_COMPLETING: u8 = 5;
+
+    pub fn name(s: u8) -> &'static str {
+        match s {
+            UNLOADED => "Unloaded",
+            LOADED => "Loaded",
+            LOADING => "Loading",
+            ERROR => "Error",
+            UNLOADING => "Unloading",
+            LOAD_COMPLETING => "LoadCompleting",
+            _ => "?",
+        }
+    }
+}
+
+/// A property based load state machine (`03_05_01 §4.23.2`).
+#[derive(Debug, Clone, Default)]
+pub struct Lsm {
+    pub state: u8,
+    /// The additional load controls (event 03h) of the current load, as
+    /// written (10 octets each).
+    pub controls: Vec<Vec<u8>>,
+    /// Memory address that mirrors the state (memory mapped load status of
+    /// mask 0705h, `GroupAddressTableLoadStatus` …).
+    pub status_address: Option<u16>,
+}
+
+impl Lsm {
+    /// Next state for a load event, `03_05_01 Table 94`; where the table
+    /// allows several transitions, the recommended one.
+    fn next(state: u8, event: u8) -> u8 {
+        use load_state::*;
+        match (event, state) {
+            (0x01, UNLOADED | LOADED | LOADING) => LOADING,
+            (0x01, _) => ERROR,
+            (0x02, UNLOADED) => UNLOADED,
+            (0x02, LOADED | LOADING) => LOADED,
+            (0x02, _) => ERROR,
+            (0x03, UNLOADED) => UNLOADED,
+            (0x03, LOADING) => LOADING,
+            (0x03, _) => ERROR,
+            (0x04, _) => UNLOADED,
+            // No operation and unknown events: no change.
+            _ => state,
+        }
     }
 }
 
@@ -111,6 +194,11 @@ pub struct Device {
     pub prog_mode: bool,
     pub objects: Vec<Object>,
     pub memory: Vec<u8>,
+    /// Memory octets written by a client.
+    written: Vec<bool>,
+    /// Run state of the application: running after a restart with the
+    /// application loaded.
+    running: bool,
     conn: Option<TlConnection>,
 }
 
@@ -118,19 +206,19 @@ impl Device {
     /// A device with a device object (index 0) holding the properties ETS
     /// reads to identify a device; memory is 64 KiB of zeros.
     pub fn new(address: u16, mask: u16, manufacturer: u16, serial: [u8; 6]) -> Self {
-        let device_object = Object {
-            properties: vec![
-                Property::new(pid::OBJECT_TYPE, pdt::UNSIGNED_INT, 2, &[0, 0]),
-                Property::new(pid::SERIAL_NUMBER, pdt::GENERIC_06, 6, &serial),
-                Property::new(pid::MANUFACTURER_ID, pdt::UNSIGNED_INT, 2, &manufacturer.to_be_bytes()),
-                Property::new(pid::DEVICE_CONTROL, pdt::BITSET8, 1, &[0]),
-                Property::new(pid::ORDER_INFO, pdt::GENERIC_10, 10, &[0; 10]),
-                Property::new(pid::VERSION, pdt::VERSION, 2, &[0, 0]),
-                Property::new(pid::PROGMODE, pdt::BITSET8, 1, &[0]),
-                Property::new(pid::MAX_APDULENGTH, pdt::UNSIGNED_INT, 2, &[0, 15]),
-                Property::new(pid::HARDWARE_TYPE, pdt::GENERIC_06, 6, &[0; 6]),
-            ],
-        };
+        // No PID_DEVICE_CONTROL: the BE-02001.02 has none (ETS5.log of a
+        // download, 2026-11-03), and without it ETS checks memory writes by
+        // reading them back.
+        let mut device_object = Object::new(0);
+        device_object.properties.extend([
+            Property::new(pid::SERIAL_NUMBER, pdt::GENERIC_06, 6, &serial),
+            Property::new(pid::MANUFACTURER_ID, pdt::UNSIGNED_INT, 2, &manufacturer.to_be_bytes()),
+            Property::new(pid::ORDER_INFO, pdt::GENERIC_10, 10, &[0; 10]),
+            Property::new(pid::VERSION, pdt::VERSION, 2, &[0, 0]),
+            Property::new(pid::PROGMODE, pdt::BITSET8, 1, &[0]),
+            Property::new(pid::MAX_APDULENGTH, pdt::UNSIGNED_INT, 2, &[0, 15]),
+            Property::new(pid::HARDWARE_TYPE, pdt::GENERIC_06, 6, &[0; 6]),
+        ]);
         Device {
             address,
             serial,
@@ -138,8 +226,134 @@ impl Device {
             prog_mode: false,
             objects: vec![device_object],
             memory: vec![0; 0x10000],
+            written: vec![false; 0x10000],
+            running: false,
             conn: None,
         }
+    }
+
+    /// Add the interface object of a loadable part at `index` (objects 1–4
+    /// of System 7: address table, association table, application, PEI
+    /// program), with its load state machine.
+    pub fn add_loadable(&mut self, index: usize, kind: u16, status_address: Option<u16>) {
+        let mut o = Object::new(kind);
+        let mut control = Property::new(pid::LOAD_STATE_CONTROL, pdt::CONTROL, 10, &[0; 10]);
+        control.writable = true;
+        o.properties.push(control);
+        match kind {
+            1 | 2 => o.properties.push(Property::new(pid::TABLE_REFERENCE, pdt::UNSIGNED_INT, 2, &[0, 0])),
+            _ => {
+                let mut run = Property::new(pid::RUN_STATE_CONTROL, pdt::CONTROL, 10, &[0; 10]);
+                run.writable = true;
+                let mut version = Property::new(pid::PROGRAM_VERSION, pdt::GENERIC_05, 5, &[0; 5]);
+                version.writable = true;
+                o.properties.extend([run, version]);
+            }
+        }
+        let mut stamp = Property::new(pid::STAMP, pdt::GENERIC_08, 8, &[0; 8]);
+        stamp.writable = true;
+        o.properties.push(stamp);
+        o.lsm = Some(Lsm { status_address, ..Default::default() });
+        if self.objects.len() <= index {
+            self.objects.resize(index + 1, Object::new(0xFFFF));
+        }
+        self.objects[index] = o;
+        self.sync_load_status();
+    }
+
+    pub fn set_property(&mut self, object: usize, id: u8, value: &[u8]) {
+        self.objects[object].set(id, value);
+    }
+
+    /// Mirror the load states into memory (memory mapped load status).
+    fn sync_load_status(&mut self) {
+        for o in &self.objects {
+            if let Some(Lsm { state, status_address: Some(a), .. }) = o.lsm {
+                self.memory[a as usize] = state;
+            }
+        }
+    }
+
+    /// A load event written to PID_LOAD_STATE_CONTROL of `object`.
+    fn load_event(&mut self, object: usize, event: &[u8], notes: &mut Vec<String>) {
+        let o = &mut self.objects[object];
+        let Some(lsm) = o.lsm.as_mut() else { return };
+        let before = lsm.state;
+        lsm.state = Lsm::next(before, event[0]);
+        match event[0] {
+            0x01 if before != load_state::LOADING => lsm.controls.clear(),
+            0x04 => lsm.controls.clear(),
+            0x03 if lsm.state == load_state::LOADING => {
+                lsm.controls.push(event.to_vec());
+                // Effects of the segment controls (`03_05_02 §3.31.3.4`):
+                // a data segment of a table sets its table reference, a task
+                // segment carries the application id.
+                match (event[1], o.kind) {
+                    (0x00, 1 | 2) => o.set(pid::TABLE_REFERENCE, &event[2..4]),
+                    (0x02, 3 | 4) => o.set(pid::PROGRAM_VERSION, &event[5..10]),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+        let after = o.lsm.as_ref().map_or(before, |l| l.state);
+        if after == load_state::ERROR && before != load_state::ERROR {
+            notes.push(format!("object {object}: load event {:02X}h in state {}: Error", event[0], load_state::name(before)));
+        }
+        self.sync_load_status();
+    }
+
+    /// Device restart: load states (`03_05_01 Table 94`, last row) and the
+    /// run state.
+    fn restart(&mut self) {
+        for o in &mut self.objects {
+            if let Some(lsm) = o.lsm.as_mut() {
+                if matches!(lsm.state, load_state::LOADING | load_state::UNLOADING) {
+                    lsm.state = load_state::UNLOADED;
+                }
+            }
+        }
+        self.running = self.objects.iter().any(|o| o.kind == 3 && o.lsm.as_ref().is_some_and(|l| l.state == load_state::LOADED));
+        self.sync_load_status();
+        self.conn = None;
+    }
+
+    /// The device state as stable text, for comparing two downloads.
+    pub fn dump(&self) -> String {
+        let mut out = format!("device {}\nmask {:04X}\n", ia(self.address), self.mask);
+        for (i, o) in self.objects.iter().enumerate() {
+            if o.kind == 0xFFFF {
+                continue;
+            }
+            out += &format!("object {i} type {}\n", o.kind);
+            if let Some(lsm) = &o.lsm {
+                out += &format!("  load state {} {}\n", lsm.state, load_state::name(lsm.state));
+                for c in &lsm.controls {
+                    out += &format!("  load control {}\n", hex(c));
+                }
+            }
+            if o.kind == 3 {
+                out += &format!("  run state {}\n", if self.running { "running" } else { "halted" });
+            }
+            for p in &o.properties {
+                if matches!(p.id, pid::OBJECT_TYPE | pid::LOAD_STATE_CONTROL | pid::RUN_STATE_CONTROL) {
+                    continue;
+                }
+                let v: Vec<String> = p.elements.iter().map(|e| hex(e)).collect();
+                out += &format!("  pid {}: {}\n", p.id, v.join(" | "));
+            }
+        }
+        out += "memory written\n";
+        for row in (0..self.memory.len()).step_by(16) {
+            if !self.written[row..row + 16].iter().any(|&w| w) {
+                continue;
+            }
+            let cells: Vec<String> = (row..row + 16)
+                .map(|a| if self.written[a] { format!("{:02X}", self.memory[a]) } else { "--".into() })
+                .collect();
+            out += &format!("  {row:04X}: {}\n", cells.join(" "));
+        }
+        out
     }
 
     pub fn set_prog_mode(&mut self, on: bool) {
@@ -214,9 +428,6 @@ impl Device {
                     let tx = self.conn.map_or(0, |c| c.tx);
                     out.push(Out { dst: src, broadcast: false, tpci: tpci::T_DATA_CONNECTED | tpci::seq(tx), apdu: resp });
                 }
-                if apci_of(&apdu) == Some(apci::RESTART) {
-                    self.conn = None;
-                }
                 out
             }
             _ => {
@@ -287,10 +498,14 @@ impl Device {
                 let data = apdu.get(4..4 + count)?;
                 if addr + count <= self.memory.len() {
                     self.memory[addr..addr + count].copy_from_slice(data);
+                    self.written[addr..addr + count].fill(true);
                 }
                 return None;
             }
-            apci::RESTART if code == apci::RESTART => return None,
+            apci::RESTART if code == apci::RESTART => {
+                self.restart();
+                return None;
+            }
             apci_ext::ADC_READ => {
                 // No AD converter is simulated: read_count 0 is the error
                 // answer (`03_03_07 §3.5.2`).
@@ -322,6 +537,15 @@ impl Device {
     /// nr_of_elem/start_index.
     fn property_read(&mut self, h: &[u8]) -> Vec<u8> {
         let (count, start) = (h[2] >> 4, u16::from_be_bytes([h[2] & 0x0F, h[3]]));
+        if let Some(state) = self.control_state(h[0] as usize, h[1]) {
+            // Load and run state: one octet (`03_05_01 §4.2.5`, `§4.2.6`).
+            let data = match (start, count) {
+                (0, _) => Some(vec![0, 1]),
+                (1, 1) => Some(vec![state]),
+                _ => None,
+            };
+            return property_response(h, count, start, data);
+        }
         let data = self
             .objects
             .get_mut(h[0] as usize)
@@ -332,6 +556,20 @@ impl Device {
 
     fn property_write(&mut self, h: &[u8], data: &[u8], notes: &mut Vec<String>) -> Vec<u8> {
         let (count, start) = (h[2] >> 4, u16::from_be_bytes([h[2] & 0x0F, h[3]]));
+        let object = h[0] as usize;
+        if self.control_state(object, h[1]).is_some() {
+            if (start, count, data.len()) != (1, 1, 10) {
+                notes.push("load/run control write is not one 10-octet element".into());
+                return property_response(h, count, start, None);
+            }
+            if h[1] == pid::LOAD_STATE_CONTROL {
+                self.load_event(object, data, notes);
+            } else {
+                notes.push(format!("run control event {:02X}h ignored", data[0]));
+            }
+            let state = self.control_state(object, h[1]);
+            return property_response(h, count, start, state.map(|s| vec![s]));
+        }
         let Some(p) = self.objects.get_mut(h[0] as usize).and_then(|o| o.property(h[1])) else {
             notes.push("write to a missing property".into());
             return property_response(h, count, start, None);
@@ -379,6 +617,18 @@ impl Device {
         r
     }
 
+    /// The state behind PID_LOAD_STATE_CONTROL or PID_RUN_STATE_CONTROL of
+    /// an object with a load state machine.
+    fn control_state(&self, object: usize, id: u8) -> Option<u8> {
+        let o = self.objects.get(object)?;
+        let lsm = o.lsm.as_ref()?;
+        match id {
+            pid::LOAD_STATE_CONTROL => Some(lsm.state),
+            pid::RUN_STATE_CONTROL if o.kind == 3 || o.kind == 4 => Some((o.kind == 3 && self.running) as u8),
+            _ => None,
+        }
+    }
+
     /// The partner of the open Transport Layer connection.
     pub fn connection(&self) -> Option<u16> {
         self.conn.map(|c| c.partner)
@@ -418,6 +668,10 @@ fn property_response(h: &[u8], count: u8, start: u16, data: Option<Vec<u8>>) -> 
 /// The two APCI octets of a 10-bit service code.
 fn apci2(code: u16) -> Vec<u8> {
     vec![(code >> 8) as u8 & 0x03, code as u8]
+}
+
+fn hex(b: &[u8]) -> String {
+    b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" ")
 }
 
 pub fn ia(a: u16) -> String {
@@ -488,6 +742,37 @@ mod tests {
         // A_ADC_Read channel 1, 8 reads (ETS device info): error answer.
         let adc = d.receive(&ld(tpci::T_DATA_INDIVIDUAL, ETS, ME, &[0x01, 0x81, 0x08]), &mut n);
         assert_eq!(adc[0].apdu, vec![0x01, 0xC1, 0, 0, 0]);
+    }
+
+    #[test]
+    fn load_state_machine() {
+        use load_state::*;
+        let mut d = dev();
+        d.add_loadable(1, 1, Some(0xB6EA));
+        let mut n = Vec::new();
+        let mut event = |d: &mut Device, e: &[u8]| {
+            let mut data = e.to_vec();
+            data.resize(10, 0);
+            let apdu = knx_transport::apdu::property_value_write(1, pid::LOAD_STATE_CONTROL, 1, 1, &data);
+            let out = d.receive(&ld(tpci::T_DATA_INDIVIDUAL, ETS, ME, &apdu), &mut n);
+            *out[0].apdu.last().unwrap()
+        };
+        // Segment controls outside Loading are ignored (Table 94: R).
+        assert_eq!(event(&mut d, &[0x03, 0x00, 0x40, 0x00]), UNLOADED);
+        assert_eq!(event(&mut d, &[0x01]), LOADING);
+        assert_eq!(event(&mut d, &[0x03, 0x00, 0x40, 0x00, 0x02, 0x01, 0xFF, 0x03, 0x80]), LOADING);
+        assert_eq!(d.memory[0xB6EA], LOADING);
+        assert_eq!(event(&mut d, &[0x02]), LOADED);
+        assert!(d.dump().contains("  pid 7: 40 00\n"));
+        // An additional load control in Loaded is an error; Unload recovers.
+        assert_eq!(event(&mut d, &[0x03, 0x00]), ERROR);
+        assert_eq!(event(&mut d, &[0x01]), ERROR);
+        assert_eq!(event(&mut d, &[0x04]), UNLOADED);
+        assert!(!d.dump().contains("load control"));
+        // A restart while loading leaves the part unloaded.
+        event(&mut d, &[0x01]);
+        d.receive(&ld(tpci::T_DATA_INDIVIDUAL, ETS, ME, &knx_transport::apdu::restart()), &mut n);
+        assert_eq!(d.memory[0xB6EA], UNLOADED);
     }
 
     #[test]

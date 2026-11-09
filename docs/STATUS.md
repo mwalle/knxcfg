@@ -96,8 +96,10 @@ D14 product store: project `vendor/` (default) + global
   (`docs/sim-plan.md`): `knxip` (frames, HPAI incl. route back, DIBs),
   `server` (search, connections, tunnelling, device management, heartbeat,
   repetitions), `bus` (`L_Data.con`, routing, frame log), `device` (TL
-  connection, DD0, memory, properties, descriptions). ETS 5.7.4 connects and
-  reads the device info of a simulated device.
+  connection, DD0, memory, properties, descriptions, load state machines),
+  `profile` (devices from a knxprod, System 7 masks), dumps, `--replay`.
+  ETS 5.7.4 downloads into a simulated BE-02001.02; a replay of a real
+  device's download matches it frame for frame.
 - `knx-proj` — `.knxproj` import (M2, format in `docs/knxproj-format.md`):
   `ProjectFile::open/convert/extract_product`. Parameters are keyed like
   everywhere else, links use the ASAP; a parameter with different values on
@@ -186,10 +188,12 @@ Still to do for M2: per-object flag/priority overrides (reported at import,
 not yet applied to the tables), confirming that the first `Links` entry is the
 sending address, and keeping the data listed under "Not imported" in
 `docs/knxproj-format.md`, which M3 needs (D7 Buildings/Functions).
-**knx-sim** (`docs/sim-plan.md`, in progress): step 1 done (tunnelling
-server, bus, simulated device; ETS connects, reads device info and finds a
-device in programming mode). `tools/vm.py` operates ETS in the VM.
-Next: **knx-sim** step 2 (simulated BE-02001.02, ETS download, dump) · finish **M2** ·
+**knx-sim** (`docs/sim-plan.md`, in progress): steps 1 and 2 done. ETS
+downloads into a simulated BE-02001.02; the dump compared with knxcfg's
+download of the same project shows three differences (task segments of LSM
+1/2, table segments written whole, 31 parameter octets where ETS keeps the
+template), see "Step 2 results". `tools/vm.py` operates ETS in the VM.
+Next: **knx-sim** step 3 (fix those, live download in knxcfg) · finish **M2** ·
 finish **M4** · **M3** `.knxproj` export · **M6** hardening.
 
 ## Known loose ends
@@ -200,8 +204,10 @@ finish **M4** · **M3** `.knxproj` export · **M6** hardening.
   0912h/091Ah.
 - Unverified against ETS: System B table bytes, the partial download, the
   communication flag of unlinked System B objects, rounding of calculation
-  results into integer parameters, the content of table segments behind the
-  table end (the template residue is kept).
+  results into integer parameters.
+- Differs from ETS (knx-sim step 2): ETS writes only the used part of the
+  System 7 tables, while knxcfg writes the template residue behind the table
+  end.
 - The memory encoder rejects `TypeText` parameters ("parameter type has no size")
   and an IP address default of `0`, so MDT application `A-0133-10-9E94` (mask 07B0)
   has no image. Couplers: see "Couplers" under Milestones. Calculations using `switch`
@@ -209,7 +215,7 @@ finish **M4** · **M3** `.knxproj` export · **M6** hardening.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
-`cargo build --offline` · `cargo test --offline` (118 tests, incl. the ETS5
+`cargo build --offline` · `cargo test --offline` (121 tests, incl. the ETS5
 oracle regression test that reads `refs/knxprod` and the import of the ETS
 projects in `refs/knxproj`).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),

@@ -15,8 +15,8 @@ use std::sync::mpsc;
 #[command(about = "KNXnet/IP tunnelling interface with simulated KNX devices")]
 struct Args {
     /// Local IPv4 address to serve on (UDP 3671, multicast search on its interface).
-    #[arg(long)]
-    listen: Ipv4Addr,
+    #[arg(long, required_unless_present = "replay")]
+    listen: Option<Ipv4Addr>,
     /// Individual address of the interface.
     #[arg(long, default_value = "1.1.250")]
     address: String,
@@ -27,6 +27,14 @@ struct Args {
     /// (e.g. 1.1.1:0705:0083).
     #[arg(long = "device", value_name = "SPEC")]
     devices: Vec<String>,
+    /// Simulated device built from a knxprod: <ia>:<knxprod>[:<Hardware2ProgramRefId>].
+    #[arg(long = "product", value_name = "SPEC")]
+    products: Vec<String>,
+    /// Do not serve: send the requests in this file to the devices (lines
+    /// `> <cEMI hex>` or `[nnn] <cEMI hex>` as printed by `knxcfg download
+    /// --frames`), then print the device dumps.
+    #[arg(long, value_name = "FILE")]
+    replay: Option<std::path::PathBuf>,
     /// Also write the frame log to this file.
     #[arg(long)]
     log: Option<std::path::PathBuf>,
@@ -49,13 +57,33 @@ fn device(spec: &str) -> Result<Device> {
     Ok(Device::new(addr, mask, manufacturer, [m0, m1, 0x51, 0x4D, a0, a1]))
 }
 
+fn product(spec: &str) -> Result<Device> {
+    let (addr, rest) = spec.split_once(':').with_context(|| format!("product spec is <ia>:<knxprod>[:<h2p>]: {spec}"))?;
+    // The application reference starts with the manufacturer (M-xxxx_H-…).
+    let (path, h2p) = match rest.rsplit_once(':') {
+        Some((p, h)) if h.starts_with("M-") => (p, h),
+        _ => (rest, ""),
+    };
+    knx_sim::profile::device(std::path::Path::new(path), h2p, parse_ia(addr)?)
+}
+
 fn main() -> Result<()> {
     let args = Args::parse();
-    let devices = args.devices.iter().map(|s| device(s)).collect::<Result<Vec<_>>>()?;
+    let mut devices = args.devices.iter().map(|s| device(s)).collect::<Result<Vec<_>>>()?;
+    devices.extend(args.products.iter().map(|s| product(s)).collect::<Result<Vec<_>>>()?);
     let file = match &args.log {
         Some(p) => Some(std::fs::File::create(p).with_context(|| format!("create {}", p.display()))?),
         None => None,
     };
+    if let Some(path) = &args.replay {
+        let text = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
+        let mut bus = Bus::new(devices, Log::to_file(file));
+        knx_sim::replay(&mut bus, &text, parse_ia(&args.tunnel)?)?;
+        for d in &bus.devices {
+            print!("{}", d.dump());
+        }
+        return Ok(());
+    }
     let address = parse_ia(&args.address)?;
     let desc = Description {
         individual_address: address,
@@ -64,11 +92,12 @@ fn main() -> Result<()> {
         name: "knx-sim".into(),
     };
     let bus = Bus::new(devices, Log::new(file));
-    let listen = std::net::SocketAddrV4::new(args.listen, knx_sim::knxip::PORT);
+    let ip = args.listen.expect("required without --replay");
+    let listen = std::net::SocketAddrV4::new(ip, knx_sim::knxip::PORT);
     let mut server = Server::new(listen, desc, parse_ia(&args.tunnel)?, bus)?;
 
     let (tx, rx) = mpsc::channel();
-    Server::spawn_multicast(args.listen, tx.clone())?;
+    Server::spawn_multicast(ip, tx.clone())?;
     std::thread::spawn(move || {
         for line in std::io::stdin().lock().lines().map_while(Result::ok) {
             if tx.send(Input::Command(line)).is_err() {

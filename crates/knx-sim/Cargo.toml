@@ -6,4 +6,5 @@ edition.workspace = true
 [dependencies]
 anyhow.workspace = true
 clap.workspace = true
+knx-prod = { path = "../knx-prod" }
 knx-transport = { path = "../knx-transport" }

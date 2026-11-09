@@ -1,11 +1,15 @@
 # knx-sim: verifying downloads against ETS without real devices
 
-Status (2026-11-09): step 1 done, `crates/knx-sim`; tested with ETS 5.7.4. Next
-is step 2.
+Status (2026-11-10): steps 1 and 2 done, `crates/knx-sim`; tested with ETS
+5.7.4. Next is step 3.
 
 Run it with
-`cargo run -p knx-sim -- --listen 192.168.77.1 --device 1.1.1:0705:0083 --log <file>`.
-Commands on stdin: `prog <ia> [on|off]`, `devices`, `quit`.
+`cargo run -p knx-sim -- --listen 192.168.77.1 --product 1.1.1:<knxprod>[:<h2p>] --log <file>`
+(or `--device <ia>:<mask>[:<manufacturer>]` for a device without a knxprod).
+Commands on stdin: `prog <ia> [on|off]`, `devices`, `dump [file]`, `quit`.
+Without a network: `--replay <file>` sends recorded requests (`> <cEMI>`
+lines) or `knxcfg download --frames` output to the devices and prints their
+dumps.
 
 ## Why
 
@@ -86,6 +90,7 @@ can be built and tested against it while the USB path is blocked.
 2. Simulated BE-02001.02 (mask 0705). Its tables are already known from the
    ETS5 capture, so it is the first check: ETS downloads, the dump must
    contain the known table bytes, then compare the parameter image.
+   **Done**, see "Step 2 results".
 3. Live download in `knxcfg` against the simulation; compare dumps.
 4. Coupler (mask 091A, the IP router of the real project): filter table and
    procedure. ETS might want to configure an IP router over IP instead of
@@ -129,6 +134,59 @@ What ETS 5.7.4 does (log of the run on 2026-11-09):
   states and program versions: step 2 has to fill them for the BE-02001.02.
 - Programming mode: `A_IndividualAddress_Read` broadcasts about every 3 s;
   the device in programming mode is listed.
+
+## Step 2 results
+
+**Simulated device.** `profile::device` builds a device from a knxprod: mask,
+manufacturer and application from the application program, the hardware type
+from the load procedure's `LdCtrlCompareProp` on PID 78 (the BE-02001.02 has 10
+octets of inline data; the device answers the first six), objects 1–4 with
+property based load state machines (`03_05_01 §4.23.2`, transitions of Table 94,
+the recommended one where the table offers several), their load states
+mirrored at the mask's memory mapped `…LoadStatus` addresses (B6EAh–B6EDh), the
+run state, and the effects of the segment controls: a data segment of a table
+sets `PID_TABLE_REFERENCE`, a task segment of the application sets
+`PID_PROGRAM_VERSION` (the application id). No `PID_DEVICE_CONTROL`, like the
+real device. The dump lists the objects with load state, load controls of the
+current load and properties, and every memory octet a client wrote.
+
+**Replay of a real download.** `ETS5.log` of 2026-11-03 holds ETS's download of
+the real BE-02001.02 at 1.1.3 with the device's answers (raw cEMI). The frames
+are extracted to `refs/ets5/be-02001-download.txt` (untracked; it contains the
+device's serial number). `tests/ets5_replay.rs` sends ETS's 81 requests to the
+simulated device and compares all 79 frames it sends with the real device's:
+equal, except the serial number (not compared) and the maximum APDU length
+(real device: 254, set in the test; not in the knxprod).
+
+**Live ETS download.** ETS project "knx-sim" (new, only for the simulation):
+BE-02001.02 at 1.1.1, default parameters, no group addresses. "Programmieren →
+Applikationsprogramm" into the simulation: completed, all state columns green.
+Same sequence as with the real device; memory writes in 12-octet chunks (the
+interface's 15), and each write is read back. The empty tables are written as
+their length octet only (01h at 4000h, 00h at 4201h).
+
+**Comparison with knxcfg.** The project, exported by ETS and imported into
+knxcfg, gives a download (`knxcfg download 1.1.1 --frames`) that was replayed
+into a second simulated device. Diff of the two dumps:
+
+- equal: load sequence, load states, application id, group object table
+  (4400h–4467h);
+- task segments of LSM 1 and 2: ETS sends PEI type and application id of the
+  application (`03 02 40 00 01 00 83 00 B6 32`), knxcfg zeros;
+- tables: knxcfg writes the whole segments including the knxprod template
+  behind the table end (and 4001h–4002h); ETS writes the length octet and the
+  used entries only, and never 4001h–4002h (with `AddressTable_Bcu1` the
+  first entry is probably the device's own address, so knxcfg might overwrite
+  it; to be checked);
+- parameter segment 4468h–450Fh: 31 octets differ, and at every one ETS wrote
+  the knxprod template byte of `AS-4468`. The same 31 offsets differ in the
+  replay of the real download. Likely knxcfg writes values (defaults) of
+  inactive parameters where ETS keeps the template; to be confirmed per
+  parameter.
+
+These are the inputs for step 3. Open question: all ETS logs of the "test"
+project show GO0's config octet as 4Bh (communication off) although GO0 is
+linked to GA-1, while `docs/ets5-findings.md` and `oracle.rs` state 4Fh.
 
 ## Operating ETS
 
