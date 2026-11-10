@@ -1741,10 +1741,11 @@ fn describe_step(step: &knx_prod::DownloadStep) -> String {
         S::WriteMem { address, data, verify } => {
             format!("WriteMem Address=0x{address:04x} Size={} Verify={verify}", data.len())
         }
-        S::WriteFilterTable { address, data, verify } => format!(
-            "WriteFilterTable Address=0x{address:04x} Size={} Verify={verify} ({} group addresses passed)",
+        S::WriteFilterTable { address, data, verify, cleared } => format!(
+            "WriteFilterTable Address=0x{address:04x} Size={} Verify={verify} ({} group addresses passed{})",
             data.len(),
-            data.iter().map(|b| b.count_ones()).sum::<u32>()
+            data.iter().map(|b| b.count_ones()).sum::<u32>(),
+            if *cleared { ", only non-zero octets written" } else { "" }
         ),
         S::ClearFilterTable { object } => format!("ClearFilterTable {object}"),
         S::ReadProp { obj_idx, prop_id } => format!("ReadProp ObjIdx={obj_idx} PropId={prop_id}"),

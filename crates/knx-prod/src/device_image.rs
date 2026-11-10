@@ -386,11 +386,14 @@ pub enum DownloadStep {
     /// Write a coupler's filter table (`LdCtrlWriteMem AddressSpace="LcFilter"`):
     /// `A_FilterTable_Open`, then `A_FilterTable_Write` (`03_05_02 §3.41`,
     /// DMP_LCExtMemWrite_RCo). `address` is the coupler's memory address
-    /// (0200h is the first octet of the table).
+    /// (0200h is the first octet of the table). With `cleared` the table was
+    /// cleared before, so only its non-zero octets need writing (ETS 5.7 does
+    /// so, knx-sim step 4).
     WriteFilterTable {
         address: u16,
         data: Vec<u8>,
         verify: bool,
+        cleared: bool,
     },
     /// Clear the filter table with the function property
     /// `PID_ROUTETABLE_CONTROL`, service `SRVID_CLEAR_FILTERTABLE`
@@ -442,6 +445,27 @@ impl std::fmt::Display for Object {
 
 /// The router object (`03_05_01 §5.3.3`).
 const OBJECT_TYPE_ROUTER: u16 = 6;
+/// The parts of a filter table write that go to the coupler: all of it, or
+/// after a clear the runs of non-zero octets, at most `chunk` octets each, as
+/// `(offset, octets)`.
+pub fn filter_table_writes(data: &[u8], cleared: bool, chunk: usize) -> Vec<(usize, &[u8])> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < data.len() {
+        if cleared && data[i] == 0 {
+            i += 1;
+            continue;
+        }
+        let mut end = (i + chunk).min(data.len());
+        if cleared {
+            end = i + data[i..end].iter().position(|b| *b == 0).unwrap_or(end - i);
+        }
+        out.push((i, &data[i..end]));
+        i = end;
+    }
+    out
+}
+
 /// The first octet of a coupler's filter table in its memory (`§5.2.1.2`).
 const FILTER_TABLE_ADDRESS: u32 = 0x0200;
 
@@ -604,6 +628,7 @@ pub fn download_plan(
                             address: u16_address(address, i)?,
                             data: table.bytes[start..start + size].to_vec(),
                             verify,
+                            cleared: out.iter().any(|s| matches!(s, DownloadStep::ClearFilterTable { .. })),
                         }
                     }
                     other => bail!(
@@ -1011,6 +1036,20 @@ fn parse_hex(s: &str) -> Result<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn filter_table_writes_skip_zeros_after_a_clear() {
+        let mut t = vec![0u8; 40];
+        t[1] = 0x0C;
+        t[10..25].fill(0xFF);
+        let all = filter_table_writes(&t, false, 11);
+        assert_eq!(all.iter().map(|(o, d)| (*o, d.len())).collect::<Vec<_>>(), [(0, 11), (11, 11), (22, 11), (33, 7)]);
+        let after_clear = filter_table_writes(&t, true, 11);
+        assert_eq!(
+            after_clear.iter().map(|(o, d)| (*o, d.len())).collect::<Vec<_>>(),
+            [(1, 1), (10, 11), (21, 4)]
+        );
+    }
     use crate::{LdCtrlAbsSegment, LdCtrlLoad, LdCtrlLoadCompleted, LdCtrlTaskSegment, LdCtrlUnload};
 
     fn system7_ap() -> ApplicationProgram {
@@ -1305,10 +1344,10 @@ mod tests {
             DownloadStep::WriteMem { address: 260, data: vec![4, 5, 6, 7], verify: true },
             DownloadStep::ClearFilterTable { object: router },
         ]);
-        let DownloadStep::WriteFilterTable { address, data, verify } = &plan[6] else {
+        let DownloadStep::WriteFilterTable { address, data, verify, cleared } = &plan[6] else {
             panic!("{:?}", plan[6]);
         };
-        assert_eq!((*address, data.len(), *verify), (0x0200, 8192, true));
+        assert_eq!((*address, data.len(), *verify, *cleared), (0x0200, 8192, true, true));
         assert_eq!(tables::read_filter_table(data), vec![0x0001, 0x0901]);
         assert_eq!(plan[7..], [DownloadStep::LoadCompleted { object: router }, DownloadStep::Restart]);
         assert!(read_back_device(&ev, &image).unwrap().links.is_empty());

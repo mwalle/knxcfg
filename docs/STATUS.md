@@ -177,8 +177,8 @@ through `A_FilterTable_Open`/`_Write` (`03_05_02 §3.41`). The procedure names t
 router object by type, so frames can only be encoded during a live download
 (which reads the object index). Compared with ETS 5.7 in knx-sim (step 4, an
 SCN-IP100.02 as line coupler): ETS downloads it through the tunnel by its
-individual address, the filter table and the procedure match; ETS writes only
-the non-zero filter table octets after clearing (knxcfg writes all 8 KiB), and
+individual address, the filter table and the procedure match; after clearing,
+both write only the non-zero filter table octets; and
 three octets of the router's memory differ (0112h/0113h C3h and 011Ah FFh from
 ETS, the template from knxcfg; no parameter covers them, ETS computes them).
 Not supported: the legacy procedures (`LcSlave`, `LdCtrlSetControlVariable`),

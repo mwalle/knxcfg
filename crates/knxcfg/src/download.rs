@@ -15,6 +15,7 @@
 //! and checks the device's answers.
 
 use anyhow::{bail, Context, Result};
+use knx_prod::device_image::filter_table_writes;
 use knx_prod::{DownloadStep, Object};
 use knx_transport::apdu::{self, apci};
 use knx_transport::cemi::{self, tpci};
@@ -102,14 +103,13 @@ pub fn plan_to_frames(plan: &[DownloadStep], dst: u16) -> Result<Vec<CemiFrame>>
                     data(&mut frames, &apdu::memory_write(offset as u16, chunk));
                 }
             }
-            DownloadStep::WriteFilterTable { address, data: bytes, .. } => {
+            DownloadStep::WriteFilterTable { address, data: bytes, cleared, .. } => {
                 if *address as usize + bytes.len() > 0x1_0000 {
                     bail!("step {}: filter table at {address:#x} goes above 64 KiB", i + 1);
                 }
                 data(&mut frames, &apdu::filter_table_open());
-                for (n, chunk) in bytes.chunks(FILTER_TABLE_WRITE_CHUNK).enumerate() {
-                    let offset = *address as usize + n * FILTER_TABLE_WRITE_CHUNK;
-                    data(&mut frames, &apdu::filter_table_write(offset as u16, chunk));
+                for (offset, chunk) in filter_table_writes(bytes, *cleared, FILTER_TABLE_WRITE_CHUNK) {
+                    data(&mut frames, &apdu::filter_table_write((*address as usize + offset) as u16, chunk));
                 }
             }
             DownloadStep::ClearFilterTable { object } => {
@@ -346,12 +346,15 @@ fn run_step(
             }
             log(&format!("{n:3} object {idx}: filter table cleared"));
         }
-        DownloadStep::WriteFilterTable { address, data, .. } => {
-            // DMP_LCExtMemWrite_RCo (`03_05_02 §3.41.2`): open, then 11-octet
-            // writes, each read back.
+        DownloadStep::WriteFilterTable { address, data, cleared, .. } => {
+            // DMP_LCExtMemWrite_RCo (`03_05_02 §3.41.2`): open, then writes of
+            // up to 11 octets, each read back. After a clear only the non-zero
+            // octets are written.
             c.send(&apdu::filter_table_open())?;
-            for (k, chunk) in data.chunks(FILTER_TABLE_WRITE_CHUNK).enumerate() {
-                let at = *address as usize + k * FILTER_TABLE_WRITE_CHUNK;
+            let writes = filter_table_writes(data, *cleared, FILTER_TABLE_WRITE_CHUNK);
+            let written: usize = writes.iter().map(|(_, w)| w.len()).sum();
+            for (offset, chunk) in writes {
+                let at = *address as usize + offset;
                 if at + chunk.len() > 0x1_0000 {
                     bail!("filter table write at {at:04X}h goes above 64 KiB");
                 }
@@ -363,7 +366,7 @@ fn run_step(
                     bail!("filter table {at:04X}h: wrote {}, read back {}", hex(chunk), hex(&resp));
                 }
             }
-            log(&format!("{n:3} filter table {address:04X}h: {} octet(s) written and read back", data.len()));
+            log(&format!("{n:3} filter table {address:04X}h: {written} octet(s) written and read back"));
         }
         DownloadStep::Delay { ms } => std::thread::sleep(Duration::from_millis(*ms as u64)),
         DownloadStep::MapError { .. } => {}
@@ -540,7 +543,7 @@ mod tests {
 
     #[test]
     fn filter_table_is_opened_and_written_in_11_octet_chunks() {
-        let plan = [DownloadStep::WriteFilterTable { address: 0x0200, data: vec![0xAA; 23], verify: true }];
+        let plan = [DownloadStep::WriteFilterTable { address: 0x0200, data: vec![0xAA; 23], verify: true, cleared: false }];
         let frames = plan_to_frames(&plan, 0x1000).unwrap();
         assert_eq!(frames.len(), 4);
         assert_eq!(tpdu(&frames[0])[1], 0xC0); // A_FilterTable_Open
@@ -549,6 +552,14 @@ mod tests {
         assert_eq!(&first[1..5], &[0xC3, 11, 0x02, 0x00]);
         assert_eq!(&tpdu(&frames[2])[1..5], &[0xC3, 11, 0x02, 0x0B]);
         assert_eq!(&tpdu(&frames[3])[1..5], &[0xC3, 1, 0x02, 0x16]);
+
+        // After a clear only the non-zero octets, as ETS 5.7 writes them.
+        let mut data = vec![0u8; 8192];
+        data[1] = 0x0C;
+        let plan = [DownloadStep::WriteFilterTable { address: 0x0200, data, verify: true, cleared: true }];
+        let frames = plan_to_frames(&plan, 0x1000).unwrap();
+        assert_eq!(frames.len(), 2);
+        assert_eq!(&tpdu(&frames[1])[1..6], &[0xC3, 1, 0x02, 0x01, 0x0C]);
     }
 
     #[test]

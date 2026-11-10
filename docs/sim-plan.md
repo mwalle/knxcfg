@@ -335,8 +335,9 @@ memory writes by the segment masks.
 octets ETS computes without a parameter: 0112h/0113h (`MPhyRstCnt`/
 `MGrRstCnt` of the 0911h memory map, `03_05_01 Table 98`) C3h instead of the
 template's 63h, and 011Ah FFh instead of 00h. The rule behind them is not
-known (one example only). knxcfg writes the whole filter table where ETS
-writes only the non-zero octets; the content is the same.
+known (one example only). knxcfg wrote the whole filter table where ETS
+writes only the non-zero octets; it now does the same after a clear (one
+`A_FilterTable_Write 01 02 01 0C` instead of 745).
 
 ## Step 6 results
 
