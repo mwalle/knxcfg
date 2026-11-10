@@ -1,7 +1,7 @@
 # knx-sim: verifying downloads against ETS without real devices
 
-Status (2026-11-10): steps 1, 2, 3 and 5 done, `crates/knx-sim`; tested with
-ETS 5.7.4.
+Status (2026-11-10): steps 1, 2, 3, 5 and 6 done, `crates/knx-sim`; tested
+with ETS 5.7.4. Step 4 (coupler) is open.
 
 Run it with
 `cargo run -p knx-sim -- --listen 192.168.77.1 --product 1.1.1:<knxprod>[:<h2p>] --log <file>`
@@ -98,7 +98,8 @@ can be built and tested against it while the USB path is blocked.
    through the bus; to be found out.
 5. System B device and the partial download. **Done**, see "Step 5 results".
 6. `Links` order: change one sending address in an ETS copy of the project,
-   export, look at `@Links` (no emulator needed).
+   export, look at `@Links` (no emulator needed). **Done**, see "Step 6
+   results".
 
 ## Step 1 results
 
@@ -294,6 +295,23 @@ ETS's; knxcfg's complete plus partial download gives the same dump as ETS's
 partial download after the complete one (the changed parameter at 40ABh).
 Not tried: what ETS does if the device moves the segment in a partial
 download.
+
+## Step 6 results
+
+In the "knx-sim" project, GO0 of 1.1.1 linked to 0/0/10 and then to 0/0/11:
+export `Links="GA-1 GA-2"`, 0/0/10 sending ("S" in the associations). The
+sending address is changed with **Bearbeiten → Sendend setzen** on the
+association (the context menus do not offer it). After that the export has
+`Links="GA-2 GA-1"`; nothing else changes. So the first `Links` entry is the
+sending address. ETS's download then writes the association table
+`02 | 02 00 | 01 00` (0/0/11 → GO0 first) at 4201h, and knxcfg's download of
+the imported project gives the same dump.
+
+Incident: the first download after "Sendend setzen" hung in ETS (log stops in
+a parameter activity calculation, about half a CPU core busy, "Alle
+abbrechen" without effect) after the identity checks. ETS was ended with
+`taskkill /IM ETS5N.exe /F` and started again; the same download then
+completed. The cause is not known; the simulation's frames were in order.
 
 ## Operating ETS
 

@@ -50,11 +50,12 @@ GroupAddresses/GroupRanges/GroupRange/GroupRange/GroupAddress[@Id @Address @Name
 ## ETS 5.7 differences
 
 - `ComObjectInstanceRef` has `@Links` (`GA-48 GA-23`) instead of `Connectors`.
-  The ids are the end of `GroupAddress/@Id` (`P-0191-0_GA-48`). The first one is
-  taken as the sending address, because the ref has no other attribute that could
-  hold it. **This is not confirmed.** The order of the ids says nothing, they are
-  not addresses. All 17 multi-link refs seen are also in ascending address order,
-  so "sending first" and "sorted by address" cannot be told apart yet.
+  The ids are the end of `GroupAddress/@Id` (`P-0191-0_GA-48`). **The first one is
+  the sending address** (confirmed with ETS 5.7.4, 2026-11-10, knx-sim step 6):
+  a GO linked to 0/0/10 (sending) and 0/0/11 exported as `Links="GA-1 GA-2"`;
+  after "Bearbeiten → Sendend setzen" on 0/0/11 the same export has
+  `Links="GA-2 GA-1"`, and nothing else in the file changes. ETS's download then
+  puts the association with 0/0/11 first, as knxcfg does.
 - Only values that differ from the default are stored.
 - No `@IsActive` or `@Priority`, and refs of hidden objects stay listed without
   links. The state of an object can only be read one way: **having links or being

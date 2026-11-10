@@ -198,8 +198,7 @@ one-way, see `docs/knxproj-format.md`. A project holds parameter values and
 visibility, not memory bytes, so comparing images still needs a capture of the
 ETS download of the same project.
 Still to do for M2: per-object flag/priority overrides (reported at import,
-not yet applied to the tables), confirming that the first `Links` entry is the
-sending address, and keeping the data listed under "Not imported" in
+not yet applied to the tables), and keeping the data listed under "Not imported" in
 `docs/knxproj-format.md`, which M3 needs (D7 Buildings/Functions).
 **knx-sim** (`docs/sim-plan.md`, in progress): steps 1–3 and 5 done. knxcfg's
 live downloads over KNXnet/IP give the same device state as ETS's for the
