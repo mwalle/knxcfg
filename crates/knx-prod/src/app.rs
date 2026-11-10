@@ -724,10 +724,9 @@ pub struct Segment {
     /// base64 template; empty when the segment has no `<Data>`.
     #[serde(rename = "Data", default)]
     pub data: Option<String>,
-    /// base64 bit mask over `<Data>`: set bits mark the octets that are
-    /// significant when an image is compared with a device read-back (e.g.
-    /// the individual address in a GrAT is masked out). Not used for
-    /// download.
+    /// base64 mask over `<Data>`: octets with mask 00h are not written by a
+    /// download (ETS 5.7 skips them: the individual address in a System 7
+    /// GrAT, unused octets of a coupler's memory; knx-sim steps 2 and 4).
     #[serde(rename = "Mask", default)]
     pub mask: Option<String>,
 }
@@ -752,6 +751,16 @@ impl Segment {
             .unwrap_or_default();
         bytes.resize(self.size_bytes(), 0);
         bytes
+    }
+
+    /// Decode the base64 `<Mask>`, filled with FFh (written) to `@Size`;
+    /// `None` without a mask.
+    pub fn decoded_mask(&self) -> Option<Vec<u8>> {
+        use base64::Engine;
+        let compact: String = self.mask.as_deref()?.chars().filter(|c| !c.is_whitespace()).collect();
+        let mut bytes = base64::engine::general_purpose::STANDARD.decode(compact).ok()?;
+        bytes.resize(self.size_bytes(), 0xFF);
+        Some(bytes)
     }
 }
 

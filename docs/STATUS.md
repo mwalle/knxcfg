@@ -161,19 +161,23 @@ download's segment address check). The plan is encoded as cEMI frames
 `PID_TABLE_REFERENCE` at run time.
 **Couplers** (masks 0912h/091Ah, property based configuration): the image is the
 parameter memory plus a filter table (`03_05_01 §5.2.1`, one bit per group address
-at 0200h) that passes every group address linked by a device behind the coupler
-(`x.0.0`: the whole area, `x.y.0`: line `x.y`; `Project::coupler_filter`). The plan
+at 0200h) that passes, as ETS 5.7 does, every group address linked by a device
+behind the coupler and by a device elsewhere, plus the addresses marked
+unfiltered (`x.0.0`: the whole area, `x.y.0`: line `x.y`; `Project::coupler_filter`).
+The plan
 follows the mask's current procedure: load state machine of the router object,
 `LdCtrlWriteMem` (`A_Memory_Write`), `LdCtrlClearLCFilterTable`
 (`PID_ROUTETABLE_CONTROL`, `SRVID_CLEAR_FILTERTABLE`) and the filter table
-through `A_FilterTable_Open`/`_Write` (`03_05_02 §3.41`). Taking `LcFilter` as the
-address space of those services is inferred from the names, not stated in the
-spec. The procedure names the router object by type, so frames can only be
-encoded during a live download (which reads the object index). Not supported:
-the legacy procedures (`LcSlave`, `LdCtrlSetControlVariable`), couplers with
-3.5 KiB tables (0900h–0911h) and Coupler Model 2.0 (2920h). Never compared with
-an ETS download; how ETS chooses the addresses (e.g. pass-through flags) is not
-in the spec.
+through `A_FilterTable_Open`/`_Write` (`03_05_02 §3.41`). The procedure names the
+router object by type, so frames can only be encoded during a live download
+(which reads the object index). Compared with ETS 5.7 in knx-sim (step 4, an
+SCN-IP100.02 as line coupler): ETS downloads it through the tunnel by its
+individual address, the filter table and the procedure match; ETS writes only
+the non-zero filter table octets after clearing (knxcfg writes all 8 KiB), and
+three octets of the router's memory differ (0112h/0113h C3h and 011Ah FFh from
+ETS, the template from knxcfg; no parameter covers them, ETS computes them).
+Not supported: the legacy procedures (`LcSlave`, `LdCtrlSetControlVariable`),
+couplers with 3.5 KiB tables (0900h–0911h) and Coupler Model 2.0 (2920h).
 **M4** (bus access, in progress): live downloads work over KNXnet/IP
 (`download --send -i <address>`, `download::execute`: device descriptor
 check, `CompareProp`, load states checked per event, every memory write read
@@ -200,11 +204,13 @@ ETS download of the same project.
 Still to do for M2: per-object flag/priority overrides (reported at import,
 not yet applied to the tables), and keeping the data listed under "Not imported" in
 `docs/knxproj-format.md`, which M3 needs (D7 Buildings/Functions).
-**knx-sim** (`docs/sim-plan.md`, in progress): steps 1–3 and 5 done. knxcfg's
-live downloads over KNXnet/IP give the same device state as ETS's for the
-BE-02001.02 (System 7) and the AKU-02UP.03 (System B, complete and partial).
-`tools/vm.py` operates ETS in the VM.
-Next: **knx-sim** step 6 (`Links` order) and step 4 (coupler) · finish **M2** ·
+**knx-sim** (`docs/sim-plan.md`): all six steps done. knxcfg's live downloads
+over KNXnet/IP give the same device state as ETS's for the BE-02001.02
+(System 7) and the AKU-02UP.03 (System B, complete and partial); for the
+IP router (coupler) all but three ETS-computed octets. Segment masks are
+honoured (ETS does not write octets with mask 00h). `tools/vm.py` operates
+ETS in the VM.
+Next: finish **M2** ·
 finish **M4** · **M3** `.knxproj` export · **M6** hardening.
 
 ## Known loose ends
@@ -223,7 +229,7 @@ finish **M4** · **M3** `.knxproj` export · **M6** hardening.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
-`cargo build --offline` · `cargo test --offline` (131 tests, incl. the ETS5
+`cargo build --offline` · `cargo test --offline` (134 tests, incl. the ETS5
 oracle regression test that reads `refs/knxprod` and the import of the ETS
 projects in `refs/knxproj`).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),

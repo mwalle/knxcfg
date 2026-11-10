@@ -766,7 +766,9 @@ pub fn download_plan(
     // for merge points 3 and 5): the steps of load state machine 5 are not
     // executed (`03_05_03 §3.9.3.4–§3.9.3.7`), except its Unload in a complete
     // download. ETS 5.7 does the same (knx-sim step 5).
+    let out = split_masked(out, image);
     let only_ap1 = !procedures.iter().any(|p| matches!(p.merge_id.trim(), "3" | "5") && !p.steps.is_empty());
+    let mut out = out;
     if image.format == TableFormat::SystemB && only_ap1 {
         out.retain(|s| match s {
             DownloadStep::Unload { object: Object::Index(5) } => kind == DownloadKind::Full,
@@ -774,6 +776,55 @@ pub fn download_plan(
         });
     }
     Ok(out)
+}
+
+/// Leave out the octets a segment's `<Mask>` marks 00h: a memory write
+/// becomes the runs of octets to write, an absolute segment with masked
+/// octets is allocated and followed by those writes.
+fn split_masked(steps: Vec<DownloadStep>, image: &DeviceImage) -> Vec<DownloadStep> {
+    // The mask octet of a device address, if a segment with a mask holds it.
+    let mask_at = |address: usize| -> Option<u8> {
+        image.segments.iter().find_map(|seg| {
+            let start = seg.address.parse::<usize>().ok()?;
+            let mask = seg.mask.as_ref()?;
+            (address >= start && address < start + mask.len()).then(|| mask[address - start])
+        })
+    };
+    let runs = |address: usize, data: &[u8], verify: bool| -> Vec<DownloadStep> {
+        let mut out = Vec::new();
+        let mut run: Option<usize> = None;
+        for i in 0..=data.len() {
+            let write = i < data.len() && mask_at(address + i) != Some(0);
+            match (write, run) {
+                (true, None) => run = Some(i),
+                (false, Some(s)) => {
+                    out.push(DownloadStep::WriteMem { address: (address + s) as u16, data: data[s..i].to_vec(), verify });
+                    run = None;
+                }
+                _ => {}
+            }
+        }
+        out
+    };
+    let masked = |address: usize, len: usize| (address..address + len).any(|a| mask_at(a) == Some(0));
+    let mut out = Vec::with_capacity(steps.len());
+    for step in steps {
+        match step {
+            DownloadStep::WriteMem { address, ref data, verify } if masked(address as usize, data.len()) => {
+                out.extend(runs(address as usize, data, verify));
+            }
+            DownloadStep::AbsSegment { address, ref data, .. } if !data.is_empty() && masked(address as usize, data.len()) => {
+                let writes = runs(address as usize, data, false);
+                let DownloadStep::AbsSegment { lsm_idx, seg_type, address, size, access, mem_type, seg_flags, .. } = step else {
+                    unreachable!()
+                };
+                out.push(DownloadStep::AbsSegment { lsm_idx, seg_type, address, size, access, mem_type, seg_flags, data: Vec::new() });
+                out.extend(writes);
+            }
+            other => out.push(other),
+        }
+    }
+    out
 }
 
 /// Whether a step addresses the interface object (load state machine) `idx`.
@@ -798,7 +849,8 @@ fn uses_object(step: &DownloadStep, idx: u8) -> bool {
 /// starts at `address`, as ETS 5.7 does them (knx-sim step 2): only the used
 /// part, not the segment's template behind the table end. In the address
 /// table ETS writes the length octet and the group addresses and skips the
-/// first entry (offset 1–2, the device's own address in `AddressTable_Bcu1`).
+/// first entry (offset 1–2, the device's own address, which the segment's
+/// `<Mask>` also leaves out).
 fn table_writes(image: &DeviceImage, address: u32) -> Option<Vec<DownloadStep>> {
     if image.format != TableFormat::System7 {
         return None;
@@ -1142,6 +1194,23 @@ mod tests {
         assert_eq!(plan[9..11], [
             write(0x4201, &[0x01, 0x01, 0x00]),
             DownloadStep::TaskSegment { lsm_idx: 2, address: 16897, pei_type: 1, app_id },
+        ]);
+    }
+
+    /// Octets with mask 00h are not written (knx-sim step 4).
+    #[test]
+    fn masked_octets_are_not_written() {
+        let mut ap = system7_ap();
+        let seg = ap.static_.as_mut().unwrap().code.as_mut().unwrap().absolute.iter_mut().find(|s| s.id == "AS-4400").unwrap();
+        seg.mask = Some("//8AAP////8=".into()); // ff ff 00 00 ff ff ff ff
+        let image = build_device_image(&ap, TableFormat::System7, &HashMap::new(), &[]).unwrap();
+        let plan = download_plan(&Evaluation::new(&ap, &HashMap::new()), &image, None, DownloadKind::Full).unwrap();
+        let at = plan.iter().position(|s| matches!(s, DownloadStep::AbsSegment { address: 17408, .. })).unwrap();
+        assert!(matches!(&plan[at], DownloadStep::AbsSegment { data, .. } if data.is_empty()));
+        let data = &image.segments.iter().find(|s| s.id == "AS-4400").unwrap().data;
+        assert_eq!(plan[at + 1..at + 3], [
+            DownloadStep::WriteMem { address: 17408, data: data[0..2].to_vec(), verify: false },
+            DownloadStep::WriteMem { address: 17412, data: data[4..8].to_vec(), verify: false },
         ]);
     }
 

@@ -42,7 +42,11 @@ pub fn device(knxprod: &Path, h2p: &str, address: u16) -> Result<Device> {
         .and_then(|m| u16::from_str_radix(m, 16).ok())
         .ok_or_else(|| anyhow!("bad mask version {:?}", ap.mask_version))?;
     let objects = mask.interface_objects();
-    if objects.iter().all(|o| o.index == 0) {
+    let filter = match mask.resource_location("GroupFilterTable") {
+        Some(("LcFilterMemory", start)) => Some((start as u16, mask.resource_length("GroupFilterTable").unwrap_or(0) as usize)),
+        _ => None,
+    };
+    if filter.is_none() && objects.iter().all(|o| o.index == 0) {
         bail!("mask {} lists no loadable interface objects", ap.mask_version);
     }
     let app_id = knx_prod::device_image::application_id(&ap)?;
@@ -59,7 +63,12 @@ pub fn device(knxprod: &Path, h2p: &str, address: u16) -> Result<Device> {
     // device. What MDT hardware answers is not known.
     let values = std::collections::HashMap::new();
     let ev = knx_prod::Evaluation::new(&ap, &values);
-    let image = knx_prod::device_image::build_device_image_eval(&ev, kp.table_format(&ap)?, &[])?;
+    let format = kp.table_format(&ap)?;
+    let image = if format == knx_prod::tables::TableFormat::Coupler {
+        knx_prod::build_coupler_image(&ev, &Default::default())?
+    } else {
+        knx_prod::device_image::build_device_image_eval(&ev, format, &[])?
+    };
     let merged = ap.load_procedure_style == "MergedProcedure";
     let plan = knx_prod::download_plan(&ev, &image, merged.then_some(&master), knx_prod::DownloadKind::Full)?;
     for step in &plan {
@@ -72,6 +81,11 @@ pub fn device(knxprod: &Path, h2p: &str, address: u16) -> Result<Device> {
         }
     }
 
+    // A coupler (0912h/091Ah): the mask names the router object by type
+    // only; the simulation puts it at index 1.
+    if let Some((start, len)) = filter {
+        dev.add_router(1, start, len);
+    }
     let system7 = mask.has_resource("GroupAddressTableLoadStatus");
     for o in objects.iter().filter(|o| o.index > 0) {
         let status_address = LOAD_STATUS

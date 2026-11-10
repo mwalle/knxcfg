@@ -21,6 +21,7 @@ pub mod pdt {
     pub const GENERIC_06: u8 = 0x16;
     pub const GENERIC_08: u8 = 0x18;
     pub const GENERIC_10: u8 = 0x1A;
+    pub const FUNCTION: u8 = 0x3E;
     pub const VERSION: u8 = 0x30;
     pub const BITSET8: u8 = 0x33;
 }
@@ -33,6 +34,14 @@ pub mod pid {
     pub const TABLE_REFERENCE: u8 = 7;
     pub const PROGRAM_VERSION: u8 = 13;
     pub const TABLE: u8 = 23;
+    /// Router object (`03_05_01 §4.5`).
+    pub const MAIN_LCCONFIG: u8 = 52;
+    pub const SUB_LCCONFIG: u8 = 53;
+    pub const MAIN_LCGRPCONFIG: u8 = 54;
+    pub const SUB_LCGRPCONFIG: u8 = 55;
+    pub const ROUTETABLE_CONTROL: u8 = 56;
+    pub const COUPL_SERV_CONTROL: u8 = 57;
+    pub const MAX_ROUTER_APDU_LENGTH: u8 = 58;
     /// Download stamp of objects 1–4 (`Stamp_SystemB` resources of mask
     /// 0705h in `knx_master.xml`).
     pub const STAMP: u8 = 27;
@@ -57,6 +66,12 @@ mod apci_ext {
     pub const AUTHORIZE_RESPONSE: u16 = 0x3D2;
     pub const ADC_READ: u16 = 0x180;
     pub const ADC_RESPONSE: u16 = 0x1C0;
+    pub const FUNCTION_PROPERTY_COMMAND: u16 = 0x2C7;
+    pub const FUNCTION_PROPERTY_STATE_RESPONSE: u16 = 0x2C9;
+    pub const FILTER_TABLE_OPEN: u16 = 0x3C0;
+    pub const FILTER_TABLE_READ: u16 = 0x3C1;
+    pub const FILTER_TABLE_RESPONSE: u16 = 0x3C2;
+    pub const FILTER_TABLE_WRITE: u16 = 0x3C3;
 }
 
 #[derive(Debug, Clone)]
@@ -207,6 +222,9 @@ pub struct Device {
     /// Memory for relative segments (`LoadEvent Data Relative Allocation`):
     /// start and end (exclusive).
     pub allocation: Option<(u32, u32)>,
+    /// Couplers: the filter table (`LcFilterMemory`, `03_05_01 §5.2.1`),
+    /// start address and contents, accessed with `A_FilterTable_*`.
+    pub filter: Option<(u16, Vec<u8>)>,
     conn: Option<TlConnection>,
 }
 
@@ -238,6 +256,7 @@ impl Device {
             written: vec![false; 0x10000],
             running: false,
             allocation: None,
+            filter: None,
             conn: None,
         }
     }
@@ -274,6 +293,29 @@ impl Device {
         }
         self.objects[index] = o;
         self.sync_load_status();
+    }
+
+    /// Make the device a coupler (masks 0912h/091Ah): a router object
+    /// (type 6) at `index` with its load state machine and the routing
+    /// properties, and a filter table of `len` octets at `start` in its own
+    /// memory.
+    pub fn add_router(&mut self, index: usize, start: u16, len: usize) {
+        self.add_loadable(index, 6, None, None);
+        let o = &mut self.objects[index];
+        for (id, value) in [
+            (pid::MAIN_LCCONFIG, 0x77),
+            (pid::SUB_LCCONFIG, 0x77),
+            (pid::MAIN_LCGRPCONFIG, 0x17),
+            (pid::SUB_LCGRPCONFIG, 0x17),
+            (pid::COUPL_SERV_CONTROL, 0x00),
+        ] {
+            let mut p = Property::new(id, pdt::UNSIGNED_CHAR, 1, &[value]);
+            p.writable = true;
+            o.properties.push(p);
+        }
+        o.properties.push(Property::new(pid::ROUTETABLE_CONTROL, pdt::FUNCTION, 1, &[0]));
+        o.properties.push(Property::new(pid::MAX_ROUTER_APDU_LENGTH, pdt::UNSIGNED_INT, 2, &[0, 15]));
+        self.filter = Some((start, vec![0; len]));
     }
 
     pub fn set_property(&mut self, object: usize, id: u8, value: &[u8]) {
@@ -419,6 +461,14 @@ impl Device {
             let (start, end) = (*start as usize, *start as usize + *size as usize);
             for row in (start..end).step_by(16) {
                 out += &format!("  {row:04X}: {}\n", hex(&self.memory[row..(row + 16).min(end)]));
+            }
+        }
+        if let Some((start, table)) = &self.filter {
+            let gas = knx_prod::tables::read_filter_table(table);
+            out += &format!("filter table at {start:04X}h: {} group address(es) passed\n", gas.len());
+            for chunk in gas.chunks(8) {
+                let list: Vec<String> = chunk.iter().map(|g| format!("{}/{}/{}", g >> 11, (g >> 8) & 7, g & 0xFF)).collect();
+                out += &format!("  {}\n", list.join(" "));
             }
         }
         out += "memory written\n";
@@ -595,6 +645,64 @@ impl Device {
             _ => {}
         }
         match code {
+            apci_ext::FILTER_TABLE_OPEN => {
+                // No answer; the router object's load state machine goes to
+                // Loaded (`03_05_01 §5.2.1.4`).
+                if let Some(lsm) = self.objects.iter_mut().filter(|o| o.kind == 6).find_map(|o| o.lsm.as_mut()) {
+                    lsm.state = load_state::LOADED;
+                }
+                None
+            }
+            apci_ext::FILTER_TABLE_READ | apci_ext::FILTER_TABLE_WRITE => {
+                // number, address (2), data (`03_03_07 §3.6.2/§3.6.3`).
+                let n = *apdu.get(2)? as usize;
+                let addr = u16::from_be_bytes([*apdu.get(3)?, *apdu.get(4)?]);
+                let Some((start, table)) = self.filter.as_mut() else {
+                    notes.push("filter table service, but the device has no filter table".into());
+                    return None;
+                };
+                let off = addr.checked_sub(*start).map(|o| o as usize).filter(|o| o + n <= table.len());
+                if code == apci_ext::FILTER_TABLE_WRITE {
+                    match (off, apdu.get(5..5 + n)) {
+                        (Some(o), Some(data)) => table[o..o + n].copy_from_slice(data),
+                        _ => notes.push(format!("filter table write {n} @{addr:04X}h outside the table")),
+                    }
+                    return None;
+                }
+                let mut r = apci2(apci_ext::FILTER_TABLE_RESPONSE);
+                match off {
+                    Some(o) => {
+                        r.push(n as u8);
+                        r.extend_from_slice(&addr.to_be_bytes());
+                        r.extend_from_slice(&table[o..o + n]);
+                    }
+                    None => {
+                        r.push(0);
+                        r.extend_from_slice(&addr.to_be_bytes());
+                    }
+                }
+                Some(r)
+            }
+            apci_ext::FUNCTION_PROPERTY_COMMAND => {
+                let (obj, id) = (*apdu.get(2)?, *apdu.get(3)?);
+                let mut r = apci2(apci_ext::FUNCTION_PROPERTY_STATE_RESPONSE);
+                r.extend_from_slice(&[obj, id]);
+                let router = self.objects.get(obj as usize).is_some_and(|o| o.kind == 6);
+                match (router, id, apdu.get(4..6)) {
+                    // SRVID_CLEAR_FILTERTABLE / SRVID_SET_FILTERTABLE
+                    // (`03_05_01 §4.5.7.2/§4.5.7.3`).
+                    (true, pid::ROUTETABLE_CONTROL, Some(&[0x00, srv @ (0x01 | 0x02)])) => {
+                        if let Some((_, table)) = self.filter.as_mut() {
+                            table.fill(if srv == 0x01 { 0x00 } else { 0xFF });
+                        }
+                        r.extend_from_slice(&[0x00, srv]);
+                    }
+                    // Not a function property: answer without return code
+                    // (`03_03_07 §3.4.3.6`).
+                    _ => notes.push(format!("function property command object {obj} PID {id} not supported")),
+                }
+                Some(r)
+            }
             apci::PROPERTY_VALUE_READ => Some(self.property_read(apdu.get(2..6)?)),
             apci::PROPERTY_VALUE_WRITE => Some(self.property_write(apdu.get(2..6)?, &apdu[6..], notes)),
             apci_ext::PROPERTY_DESCRIPTION_READ => Some(self.property_description(apdu.get(2..5)?)),
@@ -885,6 +993,26 @@ mod tests {
         event(&mut d, 1, &[0x04]);
         event(&mut d, 1, &[0x01]);
         assert_eq!(event(&mut d, 1, &[0x03, 0x0B, 0, 0, 0, 9, 0, 0]), ERROR);
+    }
+
+    #[test]
+    fn coupler_filter_table() {
+        let mut d = Device::new(ME, 0x091A, 0x0083, [0, 0x83, 0, 0, 0, 1]);
+        d.add_router(1, 0x0200, 8192);
+        let mut n = Vec::new();
+        let mut send = |d: &mut Device, apdu: &[u8]| d.receive(&ld(tpci::T_DATA_INDIVIDUAL, ETS, ME, apdu), &mut n);
+        // SRVID_SET_FILTERTABLE, then SRVID_CLEAR_FILTERTABLE.
+        assert_eq!(send(&mut d, &[0x02, 0xC7, 1, 56, 0x00, 0x02])[0].apdu, [0x02, 0xC9, 1, 56, 0x00, 0x02]);
+        assert!(d.filter.as_ref().unwrap().1.iter().all(|&b| b == 0xFF));
+        assert_eq!(send(&mut d, &[0x02, 0xC7, 1, 56, 0x00, 0x01])[0].apdu, [0x02, 0xC9, 1, 56, 0x00, 0x01]);
+        // Open (no answer, router object loaded), write 0/0/11, read back.
+        assert!(send(&mut d, &[0x03, 0xC0]).is_empty());
+        assert_eq!(d.objects[1].lsm.as_ref().unwrap().state, load_state::LOADED);
+        assert!(send(&mut d, &[0x03, 0xC3, 1, 0x02, 0x01, 0x08]).is_empty());
+        assert_eq!(send(&mut d, &[0x03, 0xC1, 1, 0x02, 0x01])[0].apdu, [0x03, 0xC2, 1, 0x02, 0x01, 0x08]);
+        assert!(d.dump().contains("filter table at 0200h: 1 group address(es) passed\n  0/0/11\n"), "{}", d.dump());
+        // Outside the table: number 0.
+        assert_eq!(send(&mut d, &[0x03, 0xC1, 1, 0x00, 0x10])[0].apdu, [0x03, 0xC2, 0, 0x00, 0x10]);
     }
 
     #[test]

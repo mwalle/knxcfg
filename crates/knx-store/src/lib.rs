@@ -149,6 +149,7 @@ mod tests {
             ga: "1/2/3".parse().unwrap(),
             name: "Light".into(),
             dpt: Some("DPST-1-1".into()),
+            unfiltered: false,
         });
         project.devices.push(DeviceInstance {
             ia: "2.1.3".parse().unwrap(),

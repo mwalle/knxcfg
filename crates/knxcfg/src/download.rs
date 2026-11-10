@@ -192,6 +192,9 @@ fn load_event(lsm_idx: u8, event: &[u8]) -> Vec<u8> {
 
 /// `A_PropertyValue_Response` (`03_03_07 §3.4.3.2`).
 const PROPERTY_VALUE_RESPONSE: u16 = 0x3D6;
+/// `A_FilterTable_Read` / `_Response` (`03_03_07 §3.6.2`).
+const FILTER_TABLE_READ: u16 = 0x3C1;
+const FILTER_TABLE_RESPONSE: u16 = 0x3C2;
 const PID_OBJECT_TYPE: u8 = 1;
 const PID_TABLE_REFERENCE: u8 = 7;
 
@@ -330,8 +333,37 @@ fn run_step(
             write_memory(c, address as u16, data)?;
             log(&format!("{n:3} memory {address:04X}h (object {obj_idx} + {offset}): {} octet(s)", data.len()));
         }
-        DownloadStep::WriteFilterTable { .. } | DownloadStep::ClearFilterTable { .. } => {
-            bail!("coupler filter tables are not supported in a live download yet")
+        DownloadStep::ClearFilterTable { object } => {
+            // SRVID_CLEAR_FILTERTABLE (`03_05_01 §4.5.7.2`): the answer is
+            // return code 00h and the service id.
+            let idx = object_index(c, object)?;
+            let cmd = apdu::function_property_command(idx, apci::PID_ROUTETABLE_CONTROL, &[0x00, apci::SRVID_CLEAR_FILTERTABLE]);
+            let resp = c.request(&cmd, apci::FUNCTION_PROPERTY_STATE_RESPONSE)?;
+            if apdu::apci_of(&resp) != Some(apci::FUNCTION_PROPERTY_STATE_RESPONSE)
+                || resp.get(2..6) != Some(&[idx, apci::PID_ROUTETABLE_CONTROL, 0x00, apci::SRVID_CLEAR_FILTERTABLE][..])
+            {
+                bail!("clearing the filter table failed: {}", hex(&resp));
+            }
+            log(&format!("{n:3} object {idx}: filter table cleared"));
+        }
+        DownloadStep::WriteFilterTable { address, data, .. } => {
+            // DMP_LCExtMemWrite_RCo (`03_05_02 §3.41.2`): open, then 11-octet
+            // writes, each read back.
+            c.send(&apdu::filter_table_open())?;
+            for (k, chunk) in data.chunks(FILTER_TABLE_WRITE_CHUNK).enumerate() {
+                let at = *address as usize + k * FILTER_TABLE_WRITE_CHUNK;
+                if at + chunk.len() > 0x1_0000 {
+                    bail!("filter table write at {at:04X}h goes above 64 KiB");
+                }
+                let at = at as u16;
+                c.send(&apdu::filter_table_write(at, chunk))?;
+                let read = [0x03, (FILTER_TABLE_READ & 0xFF) as u8, chunk.len() as u8, (at >> 8) as u8, at as u8];
+                let resp = c.request(&read, FILTER_TABLE_RESPONSE)?;
+                if apdu::apci_of(&resp) != Some(FILTER_TABLE_RESPONSE) || resp.get(2..5) != Some(&read[2..5]) || resp[5..] != *chunk {
+                    bail!("filter table {at:04X}h: wrote {}, read back {}", hex(chunk), hex(&resp));
+                }
+            }
+            log(&format!("{n:3} filter table {address:04X}h: {} octet(s) written and read back", data.len()));
         }
         DownloadStep::Delay { ms } => std::thread::sleep(Duration::from_millis(*ms as u64)),
         DownloadStep::MapError { .. } => {}

@@ -88,6 +88,12 @@ a wrong assumption loses data visibly rather than writing it to the wrong place.
 - `Line/Segment/DeviceInstance`.
 - Password-protected projects (`P-XXXX.zip` instead of `P-XXXX/`) are refused.
 
+## Group addresses
+
+- `GroupAddress/@Unfiltered="true"`: "Weiterleiten (nicht filtern)" in ETS; the
+  address passes every coupler (imported as `unfiltered`, used by
+  `Project::coupler_filter`).
+
 ## Not imported
 
 Reported by `knxcfg import`; the model has no place for these yet.

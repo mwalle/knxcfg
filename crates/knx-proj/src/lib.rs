@@ -294,6 +294,9 @@ struct XmlGroupAddress {
     name: String,
     #[serde(rename = "@DatapointType", default)]
     datapoint_type: String,
+    /// "Weiterleiten (nicht filtern)" in ETS.
+    #[serde(rename = "@Unfiltered", default)]
+    unfiltered: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -534,7 +537,8 @@ impl ProjectFile {
             if let Some((_, short)) = g.id.rsplit_once('_') {
                 ids.push(short.to_string());
             }
-            out.push((ids, GroupAddressEntry { ga, name: g.name.clone(), dpt }));
+            let unfiltered = g.unfiltered == "true";
+            out.push((ids, GroupAddressEntry { ga, name: g.name.clone(), dpt, unfiltered }));
         }
         Ok(out)
     }

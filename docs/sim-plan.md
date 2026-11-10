@@ -1,7 +1,7 @@
 # knx-sim: verifying downloads against ETS without real devices
 
-Status (2026-11-10): steps 1, 2, 3, 5 and 6 done, `crates/knx-sim`; tested
-with ETS 5.7.4. Step 4 (coupler) is open.
+Status (2026-11-10): all six steps done, `crates/knx-sim`; tested with ETS
+5.7.4.
 
 Run it with
 `cargo run -p knx-sim -- --listen 192.168.77.1 --product 1.1.1:<knxprod>[:<h2p>] --log <file>`
@@ -95,7 +95,7 @@ can be built and tested against it while the USB path is blocked.
    **Done**, see "Step 3 results".
 4. Coupler (mask 091A, the IP router of the real project): filter table and
    procedure. ETS might want to configure an IP router over IP instead of
-   through the bus; to be found out.
+   through the bus; to be found out. **Done**, see "Step 4 results".
 5. System B device and the partial download. **Done**, see "Step 5 results".
 6. `Links` order: change one sending address in an ETS copy of the project,
    export, look at `@Links` (no emulator needed). **Done**, see "Step 6
@@ -295,6 +295,48 @@ ETS's; knxcfg's complete plus partial download gives the same dump as ETS's
 partial download after the complete one (the changed parameter at 40ABh).
 Not tried: what ETS does if the device moves the segment in a partial
 download.
+
+## Step 4 results
+
+Device: MDT SCN-IP100.02/.03 "IP Router without Secure" (mask 091Ah),
+added as line coupler 1.1.0 to the "knx-sim" project. Its knxprod is not in
+`refs/knxprod`; it was extracted to the scratch directory for the run.
+
+**Simulated coupler.** Masks with a `GroupFilterTable` in `LcFilterMemory`
+get a router object (type 6, at index 1: the mask names it by type only)
+with its load state machine, PID 52–55, `PID_ROUTETABLE_CONTROL` (function
+property: `SRVID_CLEAR_FILTERTABLE`/`_SET_`, `03_05_01 §4.5.7`) and PID 58, and a
+filter table in its own memory with `A_FilterTable_Open/Read/Write`
+(`03_03_07 §3.6`; Open loads the router object, `03_05_01 §5.2.1.4`). The dump
+lists the passed group addresses.
+
+**What ETS 5.7 does.** It reaches the router through the tunnel by its
+individual address (not over IP): device descriptor, serial number, PID 1 of
+objects 0 and 1 (finding the router object), PID 58, manufacturer; unload
+and load of the router object, PID 52–55 (77h, 77h, 17h, 17h), the parameter
+memory 0108h–01FFh without the octets whose `<Mask>` is 00h (0117h–0118h),
+`SRVID_CLEAR_FILTERTABLE`, then `A_FilterTable_Open` and one 1-octet write per
+non-zero octet of the filter table (each read back), LoadCompleted, restart.
+The IP settings are not part of the download (`IPConfig="Custom"`).
+
+**Filter table.** With all users of 0/0/10 and 0/0/11 in line 1.1, ETS
+writes no filter table at all (only the clear). Marking 0/0/11 "Weiterleiten
+(nicht filtern)" (`GroupAddress/@Unfiltered="true"`) passes 0/0/11; linking a
+device in line 1.2 to 0/0/10 also passes 0/0/10. So ETS passes the addresses
+used behind the coupler and elsewhere, plus the unfiltered ones. knxcfg
+passed every address used behind the coupler; now it follows ETS, and imports
+`Unfiltered`.
+
+**Masks.** ETS does not write octets with mask 00h; that is also why it skips
+4001h–4002h of the BE-02001.02's address table. knx-prod now splits all
+memory writes by the segment masks.
+
+**Result:** knxcfg's live download of the router equals ETS's except three
+octets ETS computes without a parameter: 0112h/0113h (`MPhyRstCnt`/
+`MGrRstCnt` of the 0911h memory map, `03_05_01 Table 98`) C3h instead of the
+template's 63h, and 011Ah FFh instead of 00h. The rule behind them is not
+known (one example only). knxcfg writes the whole filter table where ETS
+writes only the non-zero octets; the content is the same.
 
 ## Step 6 results
 

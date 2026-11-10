@@ -58,6 +58,8 @@ pub struct SegmentImage {
     /// the segment belongs to.
     pub load_state_machine: Option<u8>,
     pub data: Vec<u8>,
+    /// The segment's `<Mask>`: octets with mask 00h are not written.
+    pub mask: Option<Vec<u8>>,
 }
 
 /// One parameter value written into a segment.
@@ -107,6 +109,7 @@ pub fn build_parameter_image_eval(ev: &Evaluation) -> Result<MemoryImage> {
                     memory_type: s.memory_type.clone(),
                     load_state_machine: lsm,
                     data: s.decoded_data(),
+                    mask: s.decoded_mask(),
                 })
                 .collect()
         })

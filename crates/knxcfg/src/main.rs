@@ -1122,7 +1122,7 @@ fn cmd_group_add(dir: &Path, ga_str: &str, name: Option<&str>, dpt: Option<&str>
         bail!("group address {ga} already exists");
     }
     let name = name.map(str::to_string).unwrap_or_else(|| ga.to_string());
-    project.groups.push(GroupAddressEntry { ga, name, dpt });
+    project.groups.push(GroupAddressEntry { ga, name, dpt, unfiltered: false });
     project.sort();
     knx_store::save(dir, &project)?;
     println!("Added group address {ga}");

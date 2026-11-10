@@ -233,22 +233,27 @@ impl Default for Project {
 }
 
 impl Project {
-    /// The group addresses a coupler at `coupler` has to pass: every address
-    /// linked by a device behind it. A coupler at `x.0.0` (area coupler)
-    /// serves the whole area, one at `x.y.0` (line coupler) line `x.y`. Both
-    /// directions need the same addresses: telegrams from a sender behind the
-    /// coupler to receivers elsewhere, and the other way round.
+    /// The group addresses a coupler at `coupler` has to pass, as ETS 5.7
+    /// computes them (knx-sim step 4, `docs/sim-plan.md`): the addresses
+    /// linked by a device behind the coupler and by a device elsewhere, and
+    /// every address marked unfiltered. An address used only behind the
+    /// coupler, or only outside, is blocked. A coupler at `x.0.0` (area
+    /// coupler) serves the whole area, one at `x.y.0` (line coupler) line
+    /// `x.y`.
     pub fn coupler_filter(&self, coupler: IndividualAddress) -> BTreeSet<GroupAddress> {
         let behind = |ia: IndividualAddress| {
-            ia != coupler
-                && ia.area == coupler.area
-                && (coupler.line == 0 || ia.line == coupler.line)
+            ia.area == coupler.area && (coupler.line == 0 || ia.line == coupler.line)
         };
-        self.devices
-            .iter()
-            .filter(|d| behind(d.ia))
-            .flat_map(|d| d.links.iter().map(|l| l.ga))
-            .collect()
+        let links = |inside: bool| -> BTreeSet<GroupAddress> {
+            self.devices
+                .iter()
+                .filter(|d| d.ia != coupler && behind(d.ia) == inside)
+                .flat_map(|d| d.links.iter().map(|l| l.ga))
+                .collect()
+        };
+        let mut pass: BTreeSet<GroupAddress> = links(true).intersection(&links(false)).copied().collect();
+        pass.extend(self.groups.iter().filter(|g| g.unfiltered).map(|g| g.ga));
+        pass
     }
 
     /// Normalize all collections into a canonical, deterministic order so
@@ -319,6 +324,10 @@ pub struct GroupAddressEntry {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub dpt: Option<String>,
+    /// Passed by every coupler ("Weiterleiten (nicht filtern)" in ETS,
+    /// `GroupAddress/@Unfiltered` in a `.knxproj`).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unfiltered: bool,
 }
 
 /// Device instance data (parameters + links), stored in `devices/<ia>.yaml`.
@@ -381,6 +390,34 @@ mod tests {
         assert!("1/2048".parse::<GroupAddress>().is_err());
         assert!("65536".parse::<GroupAddress>().is_err());
         assert!("0/0/0".parse::<GroupAddress>().unwrap().is_broadcast());
+    }
+
+    /// The ETS 5.7 rule (knx-sim step 4): passed are addresses used behind
+    /// the coupler and elsewhere, and unfiltered ones.
+    #[test]
+    fn coupler_filter_follows_ets() {
+        let ga = |s: &str| s.parse::<GroupAddress>().unwrap();
+        let dev = |ia: &str, gas: &[&str]| DeviceInstance {
+            ia: ia.parse().unwrap(),
+            parameters: Vec::new(),
+            links: gas.iter().map(|g| GroupObjectLink { object_number: 0, ga: ga(g), send: false }).collect(),
+        };
+        let mut p = Project::default();
+        p.devices = vec![
+            dev("1.1.1", &["0/0/10", "0/0/11", "0/0/12"]),
+            dev("1.2.1", &["0/0/10", "0/0/13"]),
+            dev("2.1.1", &["0/0/12"]),
+        ];
+        p.groups = ["0/0/10", "0/0/11", "0/0/12", "0/0/13"]
+            .iter()
+            .map(|g| GroupAddressEntry { ga: ga(g), name: String::new(), dpt: None, unfiltered: *g == "0/0/13" })
+            .collect();
+        let filter = |c: &str| p.coupler_filter(c.parse().unwrap()).into_iter().map(|g| g.to_string()).collect::<Vec<_>>();
+        // Line coupler 1.1: 0/0/10 (also in 1.2), 0/0/12 (also in area 2),
+        // 0/0/13 unfiltered; 0/0/11 stays in the line.
+        assert_eq!(filter("1.1.0"), ["0/0/10", "0/0/12", "0/0/13"]);
+        // Area coupler 1: only 0/0/12 leaves the area, plus 0/0/13.
+        assert_eq!(filter("1.0.0"), ["0/0/12", "0/0/13"]);
     }
 
     #[test]
