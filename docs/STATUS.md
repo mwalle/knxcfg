@@ -234,10 +234,9 @@ Next: finish **M4** · **M6** hardening.
   0912h/091Ah.
 - Unverified against ETS: System B tables with links, rounding of calculation
   results into integer parameters.
-- The memory encoder rejects `TypeText` parameters ("parameter type has no size")
-  and an IP address default of `0`, so MDT application `A-0133-10-9E94` (mask 07B0)
-  has no image. Couplers: see "Couplers" under Milestones. Calculations using `switch`
-  (`A-018A-31-EEE8`, `MappingError`) are outside the JS subset.
+- Couplers: see "Couplers" under Milestones. Calculations with arrays and
+  loops (KLIC's Steinhart-Hart tables) are outside the JS subset; `switch`
+  (MDT's `MappingError`) is supported.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
@@ -246,4 +245,4 @@ oracle regression test that reads `refs/knxprod`, the import of the ETS
 projects in `refs/knxproj`, and downloads into the simulator that must leave
 the devices as ETS's downloads did, `refs/ets5/*-ets-dump.txt`).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),
-zip, base64, clap, anyhow, thiserror, ratatui 0.28, crossterm 0.27.
+zip, base64, clap, anyhow, thiserror, ratatui 0.28, crossterm 0.27, rsa, sha1.

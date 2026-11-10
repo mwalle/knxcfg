@@ -10,7 +10,8 @@
 //! ```
 //!
 //! This module implements exactly that subset over `f64` values: `var`
-//! declarations, assignments, `if`/`else`, blocks, the operators
+//! declarations, assignments, `if`/`else`, `switch` with `case`/`default`/
+//! `break`, blocks, the operators
 //! `|| && == != === !== < <= > >= + - * / %` and unary `- + !`, the ternary
 //! `?:`, and `Math.{abs,floor,ceil,round,min,max,pow,sqrt,log,exp,trunc}`.
 //! Anything else (loops, arrays, strings, functions) is rejected with an
@@ -33,7 +34,9 @@ pub fn run(script: &str, vars: &mut HashMap<String, String>) -> Result<()> {
         }
     }
     for stmt in &program {
-        exec(stmt, &mut env)?;
+        if exec(stmt, &mut env)? {
+            bail!("`break` outside of a `switch`");
+        }
     }
     for (k, v) in vars.iter_mut() {
         if let Some(f) = env.get(k) {
@@ -126,6 +129,10 @@ enum Stmt {
     Assign(String, Expr),
     If(Expr, Box<Stmt>, Option<Box<Stmt>>),
     Block(Vec<Stmt>),
+    /// The value, and the `case` labels (`None` for `default`) with the
+    /// statements up to the next label.
+    Switch(Expr, Vec<(Option<Expr>, Vec<Stmt>)>),
+    Break,
     Expr(Expr),
     Empty,
 }
@@ -223,7 +230,44 @@ impl Parser {
                     self.eat_op(";");
                     return Ok(stmt);
                 }
-                "for" | "while" | "do" | "function" | "return" | "switch" => {
+                "switch" => {
+                    self.pos += 1;
+                    self.expect_op("(")?;
+                    let value = self.expr()?;
+                    self.expect_op(")")?;
+                    self.expect_op("{")?;
+                    let mut cases: Vec<(Option<Expr>, Vec<Stmt>)> = Vec::new();
+                    while !self.eat_op("}") {
+                        match self.peek().cloned() {
+                            Some(Tok::Ident(w)) if w == "case" => {
+                                self.pos += 1;
+                                let label = self.expr()?;
+                                self.expect_op(":")?;
+                                cases.push((Some(label), Vec::new()));
+                            }
+                            Some(Tok::Ident(w)) if w == "default" => {
+                                self.pos += 1;
+                                self.expect_op(":")?;
+                                cases.push((None, Vec::new()));
+                            }
+                            None => bail!("unterminated switch"),
+                            _ => {
+                                let stmt = self.stmt()?;
+                                let Some((_, body)) = cases.last_mut() else {
+                                    bail!("statement before the first case");
+                                };
+                                body.push(stmt);
+                            }
+                        }
+                    }
+                    return Ok(Stmt::Switch(value, cases));
+                }
+                "break" => {
+                    self.pos += 1;
+                    self.eat_op(";");
+                    return Ok(Stmt::Break);
+                }
+                "for" | "while" | "do" | "function" | "return" => {
                     bail!("unsupported statement `{word}`");
                 }
                 _ => {
@@ -329,7 +373,8 @@ impl Parser {
     }
 }
 
-fn exec(stmt: &Stmt, env: &mut HashMap<String, f64>) -> Result<()> {
+/// Run a statement; `true` when it ended with `break`.
+fn exec(stmt: &Stmt, env: &mut HashMap<String, f64>) -> Result<bool> {
     match stmt {
         Stmt::Assign(name, e) => {
             let v = eval(e, env)?;
@@ -337,22 +382,50 @@ fn exec(stmt: &Stmt, env: &mut HashMap<String, f64>) -> Result<()> {
         }
         Stmt::If(c, a, b) => {
             if eval(c, env)? != 0.0 {
-                exec(a, env)?;
+                return exec(a, env);
             } else if let Some(b) = b {
-                exec(b, env)?;
+                return exec(b, env);
             }
         }
         Stmt::Block(body) => {
             for s in body {
-                exec(s, env)?;
+                if exec(s, env)? {
+                    return Ok(true);
+                }
             }
         }
+        Stmt::Switch(value, cases) => {
+            // JavaScript compares the labels with `===`; all values here are
+            // numbers. Execution falls through to the following cases until
+            // a `break`.
+            let v = eval(value, env)?;
+            let mut start = None;
+            for (i, (label, _)) in cases.iter().enumerate() {
+                if let Some(l) = label {
+                    if eval(l, env)? == v {
+                        start = Some(i);
+                        break;
+                    }
+                }
+            }
+            let start = start.or_else(|| cases.iter().position(|(l, _)| l.is_none()));
+            if let Some(start) = start {
+                'cases: for (_, body) in &cases[start..] {
+                    for s in body {
+                        if exec(s, env)? {
+                            break 'cases;
+                        }
+                    }
+                }
+            }
+        }
+        Stmt::Break => return Ok(true),
         Stmt::Expr(e) => {
             eval(e, env)?;
         }
         Stmt::Empty => {}
     }
-    Ok(())
+    Ok(false)
 }
 
 fn eval(e: &Expr, env: &HashMap<String, f64>) -> Result<f64> {
@@ -454,6 +527,34 @@ mod tests {
         // Hex literals in scripts, decimal values in variables.
         run("min = 0x12; if (min < max) { errorFlag = 0; } else { errorFlag = 1; }", &mut v).unwrap();
         assert_eq!(v["errorFlag"], "0");
+    }
+
+    /// The shape of MDT's `MappingError` calculations (BE-GT2Tx.02): a switch
+    /// over a view mode with `if`/`else if` chains and `break`s.
+    #[test]
+    fn switch_with_cases_and_break() {
+        let script = "switch (ViewMode)  {\n  case 0:\n    if ((p1 != 255) && (p1 == p2))\n      Error = 1\n    else\n      Error = 0\n    break;\n  case 1:\n    if ((p8 != 255) && (p8 == p9)) Error = 1\n    else Error = 0\n    break;\n  }";
+        let mut v = vars(&[("ViewMode", "0"), ("p1", "3"), ("p2", "3"), ("p8", "1"), ("p9", "2"), ("Error", "9")]);
+        run(script, &mut v).unwrap();
+        assert_eq!(v["Error"], "1");
+        v.insert("ViewMode".into(), "1".into());
+        run(script, &mut v).unwrap();
+        assert_eq!(v["Error"], "0");
+        // No matching case and no default: nothing runs.
+        v.insert("ViewMode".into(), "2".into());
+        v.insert("Error".into(), "9".into());
+        run(script, &mut v).unwrap();
+        assert_eq!(v["Error"], "9");
+
+        // Fall through without break, and default.
+        let script = "switch (m) { case 1: a = 1; case 2: b = 2; break; default: a = 5; }";
+        let mut v = vars(&[("m", "1"), ("a", "0"), ("b", "0")]);
+        run(script, &mut v).unwrap();
+        assert_eq!((v["a"].as_str(), v["b"].as_str()), ("1", "2"));
+        let mut v = vars(&[("m", "7"), ("a", "0"), ("b", "0")]);
+        run(script, &mut v).unwrap();
+        assert_eq!((v["a"].as_str(), v["b"].as_str()), ("5", "0"));
+        assert!(run("break;", &mut vars(&[])).is_err());
     }
 
     #[test]
