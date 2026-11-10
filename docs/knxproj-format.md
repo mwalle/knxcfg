@@ -100,11 +100,25 @@ a wrong assumption loses data visibly rather than writing it to the wrong place.
   address passes every coupler (imported as `unfiltered`, used by
   `Project::coupler_filter`).
 
+## Kept for the export
+
+Besides topology, group addresses, parameters, links and object settings, the
+import keeps what an export (M3) needs: the group address style and project
+comment (`knx.yaml`), line media (`MediumTypeRefId`: MT-0 TP, MT-1 PL, MT-2 RF,
+MT-5 IP) and descriptions, the device's `ProductRefId`, description, comment
+and serial number, group address descriptions and comments, the group ranges
+(`ranges.yaml`) and the building structure (`Locations/Space` with its
+`DeviceInstanceRef`s, `locations.yaml`). ETS 5.7 writes `Locations`; it has no
+trades or functions.
+
+An object's `Text`, `FunctionText` and `DatapointType` are kept only where they
+differ from the product: ETS writes the text it shows (project language,
+placeholders filled in, e.g. `Eingang A: ` for `Input {{ChNo}}: {{0}}`), so a
+text that matches the product's template in one of its languages counts as the
+product's.
+
 ## Not imported
 
-Reported by `knxcfg import`; the model has no place for these yet.
-
-- Needed for a faithful export (M3): `Buildings`/`Locations` and functions (D7), group range
-  names, group address style, descriptions, serial numbers, object `Text`,
-  `FunctionText` and `DatapointType`, and the values of inactive refs of a
-  parameter with several refs.
+- The values of refs that are not active, for a parameter with several refs.
+- What ETS keeps for itself: download state (`*Loaded`, `LoadedImage`,
+  `CheckSums`), security, timestamps, `Puid`s.

@@ -487,8 +487,8 @@ fn cmd_import(dir: &Path, file: &Path, force: bool) -> Result<()> {
     }
     print_warnings(&imported.warnings);
     println!(
-        "Not imported: buildings and functions, group ranges, descriptions, serial numbers, \
-         group object texts and datapoint types"
+        "Not imported: values of parameters on refs that are not active, and data ETS \
+         keeps for itself (download state, checksums, security, timestamps)"
     );
     Ok(())
 }
@@ -1076,6 +1076,8 @@ fn cmd_add(
             area.lines.push(Line {
                 number: ia.line,
                 name: format!("Line {}", ia.line),
+                medium: None,
+                description: None,
                 devices: vec![],
             });
             area.lines.last_mut().unwrap()
@@ -1092,6 +1094,10 @@ fn cmd_add(
         hardware: h2p.to_string(),
         application: None,
         knxprod: Some(product_store::record_path(dir, knxprod_path)),
+        product: None,
+        description: None,
+        comment: None,
+        serial_number: None,
     });
     if !project.devices.iter().any(|d| d.ia == ia) {
         project.devices.push(DeviceInstance {
@@ -1140,7 +1146,7 @@ fn cmd_group_add(dir: &Path, ga_str: &str, name: Option<&str>, dpt: Option<&str>
         bail!("group address {ga} already exists");
     }
     let name = name.map(str::to_string).unwrap_or_else(|| ga.to_string());
-    project.groups.push(GroupAddressEntry { ga, name, dpt, unfiltered: false });
+    project.groups.push(GroupAddressEntry { ga, name, dpt, unfiltered: false, description: None, comment: None });
     project.sort();
     knx_store::save(dir, &project)?;
     println!("Added group address {ga}");
@@ -1319,7 +1325,7 @@ fn cmd_object_set(
         .objects
         .iter()
         .find(|o| o.object_number == object)
-        .copied()
+        .cloned()
         .unwrap_or(ObjectSettings { object_number: object, ..Default::default() });
     let flag = |v: &str, product: bool| -> Result<Option<bool>> {
         let on = match v {

@@ -7,6 +7,8 @@
 //! ├─ knx.yaml          # ProjectMeta
 //! ├─ topology.yaml     # Vec<Area>
 //! ├─ groups.yaml       # Vec<GroupAddressEntry>
+//! ├─ ranges.yaml       # Vec<GroupRange> (only if there are any)
+//! ├─ locations.yaml    # Vec<Space> (only if there are any)
 //! └─ devices/
 //!    └─ <ia>.yaml      # DeviceInstance
 //! ```
@@ -15,7 +17,7 @@
 //! produce byte-identical files (clean git diffs).
 
 use anyhow::{Context, Result};
-use knx_core::{Area, DeviceInstance, GroupAddressEntry, Project, ProjectMeta};
+use knx_core::{Area, DeviceInstance, GroupAddressEntry, GroupRange, Project, ProjectMeta, Space};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::fs;
@@ -24,6 +26,8 @@ use std::path::Path;
 const META_FILE: &str = "knx.yaml";
 const TOPOLOGY_FILE: &str = "topology.yaml";
 const GROUPS_FILE: &str = "groups.yaml";
+const RANGES_FILE: &str = "ranges.yaml";
+const LOCATIONS_FILE: &str = "locations.yaml";
 const DEVICES_DIR: &str = "devices";
 
 /// Load a project directory into the typed model.
@@ -32,12 +36,16 @@ pub fn load(dir: &Path) -> Result<Project> {
     let topology: Vec<Area> = read_yaml_opt(&dir.join(TOPOLOGY_FILE))?;
     let groups: Vec<GroupAddressEntry> = read_yaml_opt(&dir.join(GROUPS_FILE))?;
     let devices = load_devices(dir)?;
+    let group_ranges: Vec<GroupRange> = read_yaml_opt(&dir.join(RANGES_FILE))?;
+    let locations: Vec<Space> = read_yaml_opt(&dir.join(LOCATIONS_FILE))?;
 
     let mut project = Project {
         meta,
         topology,
         groups,
         devices,
+        group_ranges,
+        locations,
     };
     project.sort();
     Ok(project)
@@ -52,6 +60,8 @@ pub fn save(dir: &Path, project: &Project) -> Result<()> {
     write_yaml(&dir.join(META_FILE), &p.meta)?;
     write_yaml(&dir.join(TOPOLOGY_FILE), &p.topology)?;
     write_yaml(&dir.join(GROUPS_FILE), &p.groups)?;
+    write_yaml_unless_empty(&dir.join(RANGES_FILE), &p.group_ranges)?;
+    write_yaml_unless_empty(&dir.join(LOCATIONS_FILE), &p.locations)?;
 
     let devices_dir = dir.join(DEVICES_DIR);
     fs::create_dir_all(&devices_dir)?;
@@ -107,6 +117,18 @@ fn read_yaml_opt<T: DeserializeOwned + Default>(path: &Path) -> Result<T> {
     }
 }
 
+/// Write `items`, or remove the file when there are none, so that projects
+/// without them keep their four files.
+fn write_yaml_unless_empty<T: Serialize>(path: &Path, items: &[T]) -> Result<()> {
+    if items.is_empty() {
+        if path.exists() {
+            fs::remove_file(path).with_context(|| format!("removing {}", path.display()))?;
+        }
+        return Ok(());
+    }
+    write_yaml(path, &items)
+}
+
 fn write_yaml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
     let text = serde_yaml::to_string(value)?;
     fs::write(path, text).with_context(|| format!("writing {}", path.display()))
@@ -115,7 +137,7 @@ fn write_yaml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use knx_core::{Area, DeviceRef, GroupObjectLink, Line, ObjectSettings, ParameterValue};
+    use knx_core::{Area, DeviceRef, GroupObjectLink, GroupRange, Line, Medium, ObjectSettings, ParameterValue, Space};
 
     #[test]
     fn roundtrip_preserves_data_and_order() {
@@ -131,12 +153,18 @@ mod tests {
             lines: vec![Line {
                 number: 1,
                 name: "Line 1".into(),
+                medium: Some(Medium::Ip),
+                description: None,
                 devices: vec![DeviceRef {
                     ia: "2.1.3".parse().unwrap(),
                     name: "Actuator".into(),
                     hardware: "M-0083_H-180-0_HP-00B4-32-3919".into(),
                     application: None,
                     knxprod: None,
+                    product: None,
+                    description: Some("Kitchen".into()),
+                    comment: None,
+                    serial_number: Some("0083:12345678".into()),
                 }],
             }],
         });
@@ -150,6 +178,24 @@ mod tests {
             name: "Light".into(),
             dpt: Some("DPST-1-1".into()),
             unfiltered: false,
+            description: None,
+            comment: None,
+        });
+        project.group_ranges.push(GroupRange {
+            start: "1/0/0".parse().unwrap(),
+            end: "1/7/255".parse().unwrap(),
+            name: "Lights".into(),
+            description: None,
+            ranges: vec![],
+        });
+        project.locations.push(Space {
+            kind: "Building".into(),
+            name: "House".into(),
+            number: None,
+            usage: None,
+            description: None,
+            devices: vec!["2.1.3".parse().unwrap()],
+            spaces: vec![],
         });
         project.devices.push(DeviceInstance {
             ia: "2.1.3".parse().unwrap(),

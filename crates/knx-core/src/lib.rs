@@ -216,6 +216,12 @@ pub struct Project {
     pub groups: Vec<GroupAddressEntry>,
     #[serde(default)]
     pub devices: Vec<DeviceInstance>,
+    /// Named group address ranges (ETS: main and middle groups).
+    #[serde(default)]
+    pub group_ranges: Vec<GroupRange>,
+    /// The building structure (ETS: buildings view).
+    #[serde(default)]
+    pub locations: Vec<Space>,
 }
 
 impl Default for Project {
@@ -224,10 +230,14 @@ impl Default for Project {
             meta: ProjectMeta {
                 format_version: FORMAT_VERSION,
                 name: "Unnamed project".to_string(),
+                group_address_style: None,
+                comment: None,
             },
             topology: Vec::new(),
             groups: Vec::new(),
             devices: Vec::new(),
+            group_ranges: Vec::new(),
+            locations: Vec::new(),
         }
     }
 }
@@ -275,6 +285,19 @@ impl Project {
             dev.objects.retain(|o| !o.is_empty());
             dev.objects.sort_by_key(|o| o.object_number);
         }
+        sort_ranges(&mut self.group_ranges);
+    }
+
+    /// The device reference of `ia` in the topology.
+    pub fn device_ref(&self, ia: IndividualAddress) -> Option<&DeviceRef> {
+        self.topology.iter().flat_map(|a| &a.lines).flat_map(|l| &l.devices).find(|d| d.ia == ia)
+    }
+}
+
+fn sort_ranges(ranges: &mut [GroupRange]) {
+    ranges.sort_by_key(|r| (r.start, r.end));
+    for r in ranges {
+        sort_ranges(&mut r.ranges);
     }
 }
 
@@ -283,6 +306,19 @@ impl Project {
 pub struct ProjectMeta {
     pub format_version: u32,
     pub name: String,
+    /// How group addresses are shown (ETS: `GroupAddressStyle`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub group_address_style: Option<GroupAddressStyle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum GroupAddressStyle {
+    ThreeLevel,
+    TwoLevel,
+    Free,
 }
 
 /// A topological area, stored in `topology.yaml`.
@@ -299,8 +335,22 @@ pub struct Area {
 pub struct Line {
     pub number: u8,
     pub name: String,
+    /// The line's medium; `None` is twisted pair.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub medium: Option<Medium>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
     #[serde(default)]
     pub devices: Vec<DeviceRef>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Medium {
+    Tp,
+    Pl,
+    Rf,
+    Ip,
 }
 
 /// Reference to a device in the topology (identity + hardware only).
@@ -317,6 +367,16 @@ pub struct DeviceRef {
     /// Recorded at `add` time so `edit`/`download` don't need it again.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub knxprod: Option<String>,
+    /// knxprod product (`ProductRefId`), when the hardware has several.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub product: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+    /// `<manufacturer>:<serial>` in hex, as `knxcfg prog-ia --serial` takes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub serial_number: Option<String>,
 }
 
 /// A group address entry, stored in `groups.yaml`.
@@ -330,6 +390,45 @@ pub struct GroupAddressEntry {
     /// `GroupAddress/@Unfiltered` in a `.knxproj`).
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub unfiltered: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub comment: Option<String>,
+}
+
+/// A named range of group addresses, stored in `ranges.yaml`. Ranges nest
+/// (ETS: a main group holds middle groups).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupRange {
+    pub start: GroupAddress,
+    pub end: GroupAddress,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ranges: Vec<GroupRange>,
+}
+
+/// A part of the building (building, floor, room, distribution board, …),
+/// stored in `locations.yaml`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Space {
+    /// ETS space type (`Building`, `Floor`, `Room`, `Corridor`,
+    /// `DistributionBoard`, …).
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub number: Option<String>,
+    /// ETS space usage (a `SpaceUsage` id of `knx_master.xml`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub usage: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub devices: Vec<IndividualAddress>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub spaces: Vec<Space>,
 }
 
 /// Device instance data (parameters + links), stored in `devices/<ia>.yaml`.
@@ -370,7 +469,7 @@ pub struct GroupObjectLink {
 
 /// The settings of one group object that override the product's. A field
 /// that is `None` keeps the product's value.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ObjectSettings {
     pub object_number: u16,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -387,6 +486,13 @@ pub struct ObjectSettings {
     pub read_on_init: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<Priority>,
+    /// Texts and datapoint type set in the project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub function_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub dpt: Option<String>,
 }
 
 impl ObjectSettings {
@@ -477,7 +583,7 @@ mod tests {
         ];
         p.groups = ["0/0/10", "0/0/11", "0/0/12", "0/0/13"]
             .iter()
-            .map(|g| GroupAddressEntry { ga: ga(g), name: String::new(), dpt: None, unfiltered: *g == "0/0/13" })
+            .map(|g| GroupAddressEntry { ga: ga(g), name: String::new(), dpt: None, unfiltered: *g == "0/0/13", description: None, comment: None })
             .collect();
         let filter = |c: &str| p.coupler_filter(c.parse().unwrap()).into_iter().map(|g| g.to_string()).collect::<Vec<_>>();
         // Line coupler 1.1: 0/0/10 (also in 1.2), 0/0/12 (also in area 2),

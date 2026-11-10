@@ -28,7 +28,7 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use knx_core::{
     Area, DeviceInstance, DeviceRef, GroupAddress, GroupAddressEntry, GroupObjectLink,
-    IndividualAddress, Line, ObjectSettings, ParameterValue, Priority, Project,
+    GroupAddressStyle, IndividualAddress, Line, Medium, ObjectSettings, ParameterValue, Priority, Project, Space,
 };
 use knx_prod::eval::{full_key, short_key};
 use knx_prod::tables::{self, GroupObject, Link, ObjectOverride, TableFormat};
@@ -57,6 +57,8 @@ struct ProjectInformation {
     name: String,
     #[serde(rename = "@GroupAddressStyle", default)]
     group_address_style: String,
+    #[serde(rename = "@Comment", default)]
+    comment: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -83,6 +85,38 @@ struct Installation {
     topology: Option<Topology>,
     #[serde(rename = "GroupAddresses", default)]
     group_addresses: Option<GroupAddresses>,
+    #[serde(rename = "Locations", default)]
+    locations: Option<XmlLocations>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XmlLocations {
+    #[serde(rename = "Space", default)]
+    spaces: Vec<XmlSpace>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XmlSpace {
+    #[serde(rename = "@Type", default)]
+    kind: String,
+    #[serde(rename = "@Name", default)]
+    name: String,
+    #[serde(rename = "@Number", default)]
+    number: String,
+    #[serde(rename = "@Usage", default)]
+    usage: String,
+    #[serde(rename = "@Description", default)]
+    description: String,
+    #[serde(rename = "DeviceInstanceRef", default)]
+    devices: Vec<XmlRef>,
+    #[serde(rename = "Space", default)]
+    spaces: Vec<XmlSpace>,
+}
+
+#[derive(Debug, Deserialize)]
+struct XmlRef {
+    #[serde(rename = "@RefId")]
+    ref_id: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +144,10 @@ struct XmlLine {
     address: u8,
     #[serde(rename = "@Name", default)]
     name: String,
+    #[serde(rename = "@MediumTypeRefId", default)]
+    medium: String,
+    #[serde(rename = "@Description", default)]
+    description: String,
     #[serde(rename = "DeviceInstance", default)]
     devices: Vec<XmlDevice>,
     /// Newer ETS versions place the devices in `Segment`s of the line.
@@ -133,6 +171,14 @@ struct XmlDevice {
     name: String,
     #[serde(rename = "@Hardware2ProgramRefId", default)]
     h2p: String,
+    #[serde(rename = "@ProductRefId", default)]
+    product: String,
+    #[serde(rename = "@Description", default)]
+    description: String,
+    #[serde(rename = "@Comment", default)]
+    comment: String,
+    #[serde(rename = "@SerialNumber", default)]
+    serial_number: String,
     #[serde(rename = "ParameterInstanceRefs", default)]
     parameters: Option<ParameterInstanceRefs>,
     #[serde(rename = "ComObjectInstanceRefs", default)]
@@ -242,6 +288,12 @@ struct ComObjectInstanceRef {
     update_flag: String,
     #[serde(rename = "@ReadOnInitFlag", default)]
     read_on_init_flag: String,
+    #[serde(rename = "@Text", default)]
+    text: Option<String>,
+    #[serde(rename = "@FunctionText", default)]
+    function_text: Option<String>,
+    #[serde(rename = "@DatapointType", default)]
+    datapoint_type: Option<String>,
     /// Newer ETS versions: space-separated group address ids. The first is taken
     /// as the sending one, which is not confirmed (docs/knxproj-format.md).
     #[serde(rename = "@Links", default)]
@@ -278,6 +330,14 @@ struct GroupRanges {
 
 #[derive(Debug, Deserialize)]
 struct GroupRange {
+    #[serde(rename = "@Name", default)]
+    name: String,
+    #[serde(rename = "@RangeStart", default)]
+    start: u16,
+    #[serde(rename = "@RangeEnd", default)]
+    end: u16,
+    #[serde(rename = "@Description", default)]
+    description: String,
     #[serde(rename = "GroupRange", default)]
     ranges: Vec<GroupRange>,
     #[serde(rename = "GroupAddress", default)]
@@ -297,6 +357,33 @@ struct XmlGroupAddress {
     /// "Weiterleiten (nicht filtern)" in ETS.
     #[serde(rename = "@Unfiltered", default)]
     unfiltered: String,
+    #[serde(rename = "@Description", default)]
+    description: String,
+    #[serde(rename = "@Comment", default)]
+    comment: String,
+}
+
+/// `None` for an empty attribute.
+fn non_empty(s: &str) -> Option<String> {
+    (!s.is_empty()).then(|| s.to_string())
+}
+
+/// ETS line media (`MediumTypeRefId`); twisted pair is the default.
+fn medium(id: &str) -> Option<Medium> {
+    match id {
+        "MT-1" => Some(Medium::Pl),
+        "MT-2" => Some(Medium::Rf),
+        "MT-5" => Some(Medium::Ip),
+        _ => None,
+    }
+}
+
+/// `SerialNumber` (base64 of 6 octets) as `<manufacturer>:<serial>` in hex.
+fn serial_number(b64: &str) -> Option<String> {
+    use base64::Engine;
+    let b = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
+    let [m0, m1, s0, s1, s2, s3] = b.as_slice().try_into().ok()?;
+    Some(format!("{:02X}{:02X}:{:02X}{:02X}{:02X}{:02X}", m0, m1, s0, s1, s2, s3))
 }
 
 // ---------------------------------------------------------------------------
@@ -309,6 +396,7 @@ pub struct ProjectFile {
     path: PathBuf,
     name: String,
     group_address_style: String,
+    comment: String,
     installation: Installation,
 }
 
@@ -335,6 +423,7 @@ impl ProjectFile {
             path,
             name: info.project.information.name,
             group_address_style: info.project.information.group_address_style,
+            comment: info.project.information.comment,
             installation: installations.remove(0),
         })
     }
@@ -395,12 +484,16 @@ impl ProjectFile {
     /// `Hardware2ProgramRefId`.
     pub fn convert(&self, mut resolve: impl FnMut(&str) -> Result<ResolvedProduct>) -> Result<Imported> {
         let mut warnings = Vec::new();
-        if !matches!(self.group_address_style.as_str(), "" | "ThreeLevel") {
-            warnings.push(format!(
-                "the project uses the group address style {}; addresses are stored as 3-level",
-                self.group_address_style
-            ));
-        }
+        let style = match self.group_address_style.as_str() {
+            "" => None,
+            "ThreeLevel" => Some(GroupAddressStyle::ThreeLevel),
+            "TwoLevel" => Some(GroupAddressStyle::TwoLevel),
+            "Free" => Some(GroupAddressStyle::Free),
+            other => {
+                warnings.push(format!("unknown group address style {other}"));
+                None
+            }
+        };
 
         let unassigned = self.installation.topology.iter().filter_map(|t| t.unassigned.as_ref());
         for dev in unassigned.flat_map(|u| &u.devices) {
@@ -419,7 +512,12 @@ impl ProjectFile {
 
         let mut project = Project::default();
         project.meta.name = self.name.clone();
+        project.meta.group_address_style = style;
+        project.meta.comment = non_empty(&self.comment);
         project.groups = groups.into_iter().map(|(_, entry)| entry).collect();
+        let ranges = self.installation.group_addresses.as_ref().and_then(|g| g.ranges.as_ref());
+        project.group_ranges = ranges.iter().flat_map(|r| &r.items).filter_map(group_range).collect();
+        let mut device_ids: HashMap<&str, IndividualAddress> = HashMap::new();
 
         let mut products: HashMap<String, ResolvedProduct> = HashMap::new();
         let mut checks = Vec::new();
@@ -435,6 +533,8 @@ impl ProjectFile {
                 let mut line = Line {
                     number: xml_line.address,
                     name: xml_line.name.clone(),
+                    medium: medium(&xml_line.medium),
+                    description: non_empty(&xml_line.description),
                     devices: Vec::new(),
                 };
                 for dev in xml_line.devices() {
@@ -482,7 +582,12 @@ impl ProjectFile {
                         hardware: dev.h2p.clone(),
                         application: None,
                         knxprod: product.knxprod.clone(),
+                        product: non_empty(&dev.product),
+                        description: non_empty(&dev.description),
+                        comment: non_empty(&dev.comment),
+                        serial_number: serial_number(&dev.serial_number),
                     });
+                    device_ids.insert(&dev.id, ia);
                     project.devices.push(converted.instance);
                 }
                 area.lines.push(line);
@@ -501,6 +606,8 @@ impl ProjectFile {
                 }
             }
         }
+        let spaces = self.installation.locations.iter().flat_map(|l| &l.spaces);
+        project.locations = spaces.map(|s| space(s, &device_ids, &mut warnings)).collect();
         project.sort();
         Ok(Imported { project, warnings, checks })
     }
@@ -537,10 +644,49 @@ impl ProjectFile {
             if let Some((_, short)) = g.id.rsplit_once('_') {
                 ids.push(short.to_string());
             }
-            let unfiltered = g.unfiltered == "true";
-            out.push((ids, GroupAddressEntry { ga, name: g.name.clone(), dpt, unfiltered }));
+            out.push((
+                ids,
+                GroupAddressEntry {
+                    ga,
+                    name: g.name.clone(),
+                    dpt,
+                    unfiltered: g.unfiltered == "true",
+                    description: non_empty(&g.description),
+                    comment: non_empty(&g.comment),
+                },
+            ));
         }
         Ok(out)
+    }
+}
+
+fn group_range(r: &GroupRange) -> Option<knx_core::GroupRange> {
+    let ga = |raw: u16| raw.to_string().parse::<GroupAddress>().ok();
+    Some(knx_core::GroupRange {
+        start: ga(r.start)?,
+        end: ga(r.end)?,
+        name: r.name.clone(),
+        description: non_empty(&r.description),
+        ranges: r.ranges.iter().filter_map(group_range).collect(),
+    })
+}
+
+fn space(s: &XmlSpace, devices: &HashMap<&str, IndividualAddress>, warnings: &mut Vec<String>) -> Space {
+    let mut ias = Vec::new();
+    for d in &s.devices {
+        match devices.get(d.ref_id.as_str()) {
+            Some(ia) => ias.push(*ia),
+            None => warnings.push(format!("{} {:?} refers to device {}, which was not imported", s.kind, s.name, d.ref_id)),
+        }
+    }
+    Space {
+        kind: s.kind.clone(),
+        name: s.name.clone(),
+        number: non_empty(&s.number),
+        usage: non_empty(&s.usage),
+        description: non_empty(&s.description),
+        devices: ias,
+        spaces: s.spaces.iter().map(|c| space(c, devices, warnings)).collect(),
     }
 }
 
@@ -733,6 +879,7 @@ fn convert_device(
         .map(|(scope, r)| (scope, r.id.clone()))
         .collect();
 
+    let translations: Vec<_> = ap.languages.languages.iter().map(|l| ap.translations(&l.identifier)).collect();
     let mut links: Vec<GroupObjectLink> = Vec::new();
     let mut objects: Vec<ObjectSettings> = Vec::new();
     let mut compared_objects = 0;
@@ -758,7 +905,7 @@ fn convert_device(
         let is_active = active.contains(&(scope, ref_id.clone()));
         if let Some(ets_active) = object.is_active {
             compared_objects += 1;
-            compared.insert((scope, ref_id));
+            compared.insert((scope, ref_id.clone()));
             if ets_active != is_active {
                 visibility_mismatches.push(format!(
                     "group object #{asap} ({}): ETS has it {}, the evaluator {}",
@@ -778,7 +925,11 @@ fn convert_device(
             }
         }
         if object.is_active != Some(false) {
-            let settings = object_settings(object, asap, &resolved);
+            let texts = ev.scopes[scope]
+                .com_object_ref(&ref_id)
+                .map(|r| ProductTexts::of(&translations, r, &resolved))
+                .unwrap_or_default();
+            let settings = object_settings(object, asap, &resolved, &texts);
             if !settings.is_empty() {
                 objects.push(settings);
             }
@@ -947,7 +1098,58 @@ fn add_link(
 
 /// The flags and priority the project sets for an object where they differ
 /// from the product's.
-fn object_settings(object: &ComObjectInstanceRef, asap: u16, resolved: &GroupObject) -> ObjectSettings {
+/// An object's `Text` and `FunctionText` in all languages of the product, as
+/// templates (`Input {{ChNo}}: {{0}}`).
+#[derive(Default)]
+struct ProductTexts {
+    text: Vec<String>,
+    function_text: Vec<String>,
+}
+
+impl ProductTexts {
+    fn of(translations: &[HashMap<String, HashMap<String, String>>], r: &knx_prod::ComObjectRef, resolved: &GroupObject) -> Self {
+        let collect = |attr: &str, raw: &str| {
+            let mut out = vec![raw.to_string()];
+            for t in translations {
+                let get = |id: &str| t.get(id).and_then(|a| a.get(attr));
+                if let Some(text) = get(&r.id).or_else(|| get(&r.ref_id)) {
+                    out.push(text.clone());
+                }
+            }
+            out
+        };
+        ProductTexts {
+            text: collect("Text", &resolved.text),
+            function_text: collect("FunctionText", &resolved.function_text),
+        }
+    }
+}
+
+/// Whether `text` is `template` with its `{{…}}` placeholders filled in.
+fn fills_template(template: &str, text: &str) -> bool {
+    let mut literals = Vec::new();
+    let mut rest = template;
+    while let Some(start) = rest.find("{{") {
+        let Some(end) = rest[start..].find("}}") else { break };
+        literals.push(&rest[..start]);
+        rest = &rest[start + end + 2..];
+    }
+    literals.push(rest);
+    let [first, middle @ .., last] = literals.as_slice() else { return template == text };
+    if literals.len() == 1 {
+        return template == text;
+    }
+    let Some(mut tail) = text.strip_prefix(first) else { return false };
+    for lit in middle {
+        match tail.find(lit) {
+            Some(i) => tail = &tail[i + lit.len()..],
+            None => return false,
+        }
+    }
+    tail.ends_with(last)
+}
+
+fn object_settings(object: &ComObjectInstanceRef, asap: u16, resolved: &GroupObject, texts: &ProductTexts) -> ObjectSettings {
     let f = resolved.flags;
     let differs = |set: &str, product: bool| match set {
         "Enabled" if !product => Some(true),
@@ -962,8 +1164,18 @@ fn object_settings(object: &ComObjectInstanceRef, asap: u16, resolved: &GroupObj
         p if tables::priority_bits(p) == product_priority => None,
         p => p.parse::<Priority>().ok(),
     };
+    // ETS writes the text it shows, in the project's language with the
+    // placeholders filled in; only a text no product language explains was
+    // set by the user.
+    let own_text = |set: &Option<String>, product: &[String]| {
+        set.as_ref().filter(|t| !product.iter().any(|p| fills_template(p, t))).cloned()
+    };
+    let product_dpt = resolved.datapoint_type.split_whitespace().next().unwrap_or("");
     ObjectSettings {
         object_number: asap,
+        text: own_text(&object.text, &texts.text),
+        function_text: own_text(&object.function_text, &texts.function_text),
+        dpt: object.datapoint_type.as_ref().filter(|d| d.split_whitespace().next() != Some(product_dpt)).cloned(),
         communication: differs(&object.communication_flag, f.communicate),
         read: differs(&object.read_flag, f.read),
         write: differs(&object.write_flag, f.write),
@@ -1201,13 +1413,13 @@ mod tests {
             object_size: String::new(),
         };
         // `Priority="Low"` equals a product without a priority.
-        assert!(object_settings(&object, 4, &product).is_empty());
+        assert!(object_settings(&object, 4, &product, &ProductTexts::default()).is_empty());
 
         object.write_flag = "Enabled".into();
         object.transmit_flag = "Enabled".into();
         object.communication_flag = "Disabled".into();
         object.priority = "Alert".into();
-        let settings = object_settings(&object, 4, &product);
+        let settings = object_settings(&object, 4, &product, &ProductTexts::default());
         assert_eq!(
             settings,
             ObjectSettings {

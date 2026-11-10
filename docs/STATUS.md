@@ -40,7 +40,8 @@ D14 product store: project `vendor/` (default) + global
   links }`, `GroupObjectLink { object_number, ga, send }`, `Project::sort()`.
 - `knx-store` — YAML persistence, deterministic ordering; `save` removes the
   files of devices that are no longer in the project.
-  Files: `knx.yaml`, `topology.yaml`, `groups.yaml`, `devices/<ia>.yaml`.
+  Files: `knx.yaml`, `topology.yaml`, `groups.yaml`, `devices/<ia>.yaml`, and
+  `ranges.yaml`/`locations.yaml` when the project has group ranges or spaces.
 - `knx-prod` — knxprod parser and download builder:
   - `eval` — **the** parameter evaluator used by form, memory and tables:
     all matching `when`s, comparison tests, `ParameterRef/@Value` defaults,
@@ -146,7 +147,7 @@ project `vendor/` → global store (`$XDG_DATA_HOME/knxcfg/knxprod`, default
 
 ## Milestones
 Done: M0 skeleton · M1 knxprod parser · M1.5 form engine · M1.6 project
-editing + TUI.
+editing + TUI · M2 `.knxproj` import.
 **M5** (download builder): the parameter image, tables and plan are built
 for all five sample products (System 7 and System B). The System 7 tables are
 checked against the ETS5 oracle (`crates/knx-prod/tests/oracle.rs`). For the
@@ -206,15 +207,16 @@ Per-object flags and priorities set in the project are imported (`objects` in
 `devices/<ia>.yaml`, only what differs from the product), can be set with
 `knxcfg object-set`, and are applied to the group object table; checked against
 ETS in knx-sim for System 7 and System B.
-Still to do for M2: keeping the data listed under "Not imported" in
-`docs/knxproj-format.md`, which M3 needs (D7 Buildings/Functions).
+The import also keeps what the export needs (group ranges, the building
+structure, descriptions, serial numbers, line media, object texts set by the
+user; see "Kept for the export" in `docs/knxproj-format.md`). M2 is done.
 **knx-sim** (`docs/sim-plan.md`): all six steps done. knxcfg's live downloads
 over KNXnet/IP give the same device state as ETS's for the BE-02001.02
 (System 7) and the AKU-02UP.03 (System B, complete and partial); for the
 IP router (coupler) all but three ETS-computed octets. Segment masks are
 honoured (ETS does not write octets with mask 00h). `tools/vm.py` operates
 ETS in the VM.
-Next: finish **M2** ·
+Next:
 finish **M4** · **M3** `.knxproj` export · **M6** hardening.
 
 ## Known loose ends
