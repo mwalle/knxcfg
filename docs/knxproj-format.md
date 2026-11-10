@@ -122,3 +122,40 @@ product's.
 - The values of refs that are not active, for a parameter with several refs.
 - What ETS keeps for itself: download state (`*Loaded`, `LoadedImage`,
   `CheckSums`), security, timestamps, `Puid`s.
+
+## Export
+
+`knxcfg export <file>` (`knx_proj::export`) writes what ETS 5.7.4 imports
+(checked in the VM, 2026-11-10):
+
+- `P-XXXX/project.xml` and `P-XXXX/0.xml` from the model, like ETS writes them:
+  only stored parameter values (`ParameterInstanceRef` on the parameter's
+  active ref; module refs as `<app>_MD-n_M-n_MI-1_P-n_R-n`), only objects with
+  links or own settings (`ComObjectInstanceRef`, module objects as
+  `MD-n_M-n_MI-1_O-n_R-n` without the application prefix, `Links` with the
+  sending address first), `Locations`, and the group ranges. ETS computes the
+  module instances and their arguments itself, so `ModuleInstances` is left out.
+  `CreatedBy="knxcfg"` is accepted.
+- ETS fails on a project without the backbone (area 0, line 0) or without an
+  area's main line (line 0): "Die Sequenz enthält keine Elemente" when the
+  topology is shown. The export adds them where the model has none, and gives
+  group addresses outside every stored range a main and middle group.
+- The product data is copied from the devices' knxprods unchanged: the
+  application programs in use, `Catalog.xml` and `Hardware.xml` (merged by
+  element id when one manufacturer's devices come from several knxprods), other
+  files, and the largest `knx_master.xml`. ETS accepts the manufacturer's files
+  as they are; it trims them in its own exports.
+- Every directory gets `<dir>.signature`: base64 of an RSA PKCS#1 v1.5 SHA-1
+  signature over the SHA-1 of the manifest `name:base64(sha1(content))` of the
+  directory's files (names relative to the directory with `\` separators,
+  sorted, joined with `,`). ETS rejects a project without a valid signature
+  ("Projektdatei hat keine gültige Signatur"), also with an older schema. The
+  key is not part of knxcfg: `--signing-key <pem>` or
+  `~/.config/knxcfg/ets-signing-key.pem`; without one the file is unsigned.
+
+Checked: ETS's download of an exported project (knx-sim's devices with flags,
+priorities and links; and a project made with `knxcfg add/link/device-set/
+object-set` from two knxprods, with module parameters and a building) leaves
+the same device state in knx-sim as ETS's download of the original project and
+as knxcfg's own download. Importing the export again gives the same model,
+plus the added backbone, main lines and group ranges.

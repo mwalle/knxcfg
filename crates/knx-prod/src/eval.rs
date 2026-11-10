@@ -124,6 +124,11 @@ impl<'a> Scope<'a> {
         self.com_refs.get(ref_id).copied()
     }
 
+    /// The refs of a parameter, in document order.
+    pub fn refs_of(&self, param_id: &str) -> &[&'a ParameterRef] {
+        self.refs_of.get(param_id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
     /// All parameters of this scope (plain and union members).
     pub fn parameters(&self) -> impl Iterator<Item = &'a Parameter> + '_ {
         self.static_

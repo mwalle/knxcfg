@@ -151,7 +151,13 @@ enum Cmd {
         knxprod: Option<PathBuf>,
     },
     /// Export the project to an ETS .knxproj file (M3)
-    Export,
+    Export {
+        file: PathBuf,
+        /// Key for the project signature ETS checks (RSA, PKCS#8 PEM); default
+        /// ~/.config/knxcfg/ets-signing-key.pem if it exists
+        #[arg(long)]
+        signing_key: Option<PathBuf>,
+    },
     /// Import an ETS .knxproj file into this project (M2). Product data the
     /// store does not have yet is unpacked from the file into vendor/
     Import {
@@ -335,7 +341,9 @@ fn main() -> Result<()> {
             let dir = resolve_project(project.as_deref())?;
             cmd_edit(&dir, &ia, knxprod.as_deref())
         }
-        Cmd::Export => bail!("`export` is not implemented yet (M3)"),
+        Cmd::Export { file, signing_key } => {
+            cmd_export(&resolve_project(project.as_deref())?, &file, signing_key.as_deref())
+        }
         Cmd::Import { file, force } => {
             cmd_import(&resolve_project(project.as_deref())?, &file, force)
         }
@@ -1465,6 +1473,55 @@ fn cmd_edit(dir: &Path, ia_str: &str, knxprod_override: Option<&Path>) -> Result
     project.sort();
     knx_store::save(dir, &project)?;
     println!("Saved {ia}");
+    Ok(())
+}
+
+fn cmd_export(dir: &Path, file: &Path, signing_key: Option<&Path>) -> Result<()> {
+    let project = knx_store::load(dir)?;
+    let default_key = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .map(|c| c.join("knxcfg/ets-signing-key.pem"));
+    let key_path = match signing_key {
+        Some(p) => Some(p.to_path_buf()),
+        None => default_key.filter(|p| p.is_file()),
+    };
+    let key = key_path.as_deref().map(knx_proj::export::read_signing_key).transpose()?;
+
+    let mut opened = Vec::new();
+    for d in project.topology.iter().flat_map(|a| &a.lines).flat_map(|l| &l.devices) {
+        opened.push(open_device(dir, &project, d.ia, None)?);
+    }
+    let devices: Vec<knx_proj::export::ExportDevice> = opened
+        .iter()
+        .map(|o| {
+            let catalog = o
+                .knxprod
+                .products
+                .iter()
+                .find(|p| p.hardware2program_ref_id.as_deref() == Some(o.device_ref.hardware.as_str()));
+            knx_proj::export::ExportDevice {
+                ia: o.device_ref.ia,
+                ap: &o.ap,
+                knxprod: o.knxprod.path().to_path_buf(),
+                product: o
+                    .device_ref
+                    .product
+                    .clone()
+                    .or_else(|| catalog.and_then(|p| p.product_ref_id.clone()))
+                    .unwrap_or_default(),
+                product_name: catalog.map(|p| p.name.clone()).unwrap_or_default(),
+            }
+        })
+        .collect();
+    let warnings = knx_proj::export::export(&project, &devices, key.as_ref(), file)?;
+    print_warnings(&warnings);
+    println!(
+        "Exported \"{}\" to {}{}",
+        project.meta.name,
+        file.display(),
+        if key.is_some() { "" } else { " (unsigned)" }
+    );
     Ok(())
 }
 

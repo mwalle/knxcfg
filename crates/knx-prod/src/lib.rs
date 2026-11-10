@@ -76,6 +76,11 @@ pub struct KnxProd {
 }
 
 impl KnxProd {
+    /// The file this was read from.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Open a knxprod file and parse its catalog.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
         let path = path.as_ref().to_path_buf();

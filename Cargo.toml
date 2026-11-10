@@ -25,3 +25,5 @@ clap = { version = "4", features = ["derive"] }
 anyhow = "1"
 thiserror = "2"
 libc = "0.2"
+rsa = "0.9"
+sha1 = { version = "0.10", features = ["oid"] }

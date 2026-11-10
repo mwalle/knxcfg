@@ -1,4 +1,5 @@
-//! ETS project (`.knxproj`) import: project file → typed model.
+//! ETS project (`.knxproj`) import: project file → typed model. The export
+//! is in [`export`].
 //!
 //! A `.knxproj` is a ZIP archive holding the project and the product data of
 //! everything it uses (see `docs/knxproj-format.md`):
@@ -19,6 +20,9 @@
 //! [`Imported::warnings`], never dropped silently. Each device is also checked
 //! against ETS's own results: the group objects ETS marks `IsActive` have to
 //! match the ones [`knx_prod::Evaluation`] finds active.
+
+pub mod export;
+mod merge;
 
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::fs::File;
@@ -379,7 +383,7 @@ fn medium(id: &str) -> Option<Medium> {
 }
 
 /// `SerialNumber` (base64 of 6 octets) as `<manufacturer>:<serial>` in hex.
-fn serial_number(b64: &str) -> Option<String> {
+pub(crate) fn serial_number(b64: &str) -> Option<String> {
     use base64::Engine;
     let b = base64::engine::general_purpose::STANDARD.decode(b64).ok()?;
     let [m0, m1, s0, s1, s2, s3] = b.as_slice().try_into().ok()?;
@@ -485,8 +489,8 @@ impl ProjectFile {
     pub fn convert(&self, mut resolve: impl FnMut(&str) -> Result<ResolvedProduct>) -> Result<Imported> {
         let mut warnings = Vec::new();
         let style = match self.group_address_style.as_str() {
-            "" => None,
-            "ThreeLevel" => Some(GroupAddressStyle::ThreeLevel),
+            // Three levels are the default.
+            "" | "ThreeLevel" => None,
             "TwoLevel" => Some(GroupAddressStyle::TwoLevel),
             "Free" => Some(GroupAddressStyle::Free),
             other => {

@@ -282,6 +282,14 @@ impl Project {
             dev.parameters.sort_by(|a, b| a.id.cmp(&b.id));
             dev.links
                 .sort_by(|a, b| (a.object_number, a.ga).cmp(&(b.object_number, b.ga)));
+            // An object sends on its lowest address unless another one is
+            // marked, so a mark on the lowest one says nothing.
+            for i in 0..dev.links.len() {
+                let first = i == 0 || dev.links[i - 1].object_number != dev.links[i].object_number;
+                if first {
+                    dev.links[i].send = false;
+                }
+            }
             dev.objects.retain(|o| !o.is_empty());
             dev.objects.sort_by_key(|o| o.object_number);
         }

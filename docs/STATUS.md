@@ -103,11 +103,13 @@ D14 product store: project `vendor/` (default) + global
   `profile` (devices from a knxprod, System 7 masks), dumps, `--replay`.
   ETS 5.7.4 downloads into a simulated BE-02001.02; a replay of a real
   device's download matches it frame for frame.
-- `knx-proj` — `.knxproj` import (M2, format in `docs/knxproj-format.md`):
+- `knx-proj` — `.knxproj` import and export (M2/M3, format in `docs/knxproj-format.md`):
   `ProjectFile::open/convert/extract_product`. Parameters are keyed like
   everywhere else, links use the ASAP; a parameter with different values on
   several refs gets the value of the active ref. Every device is compared with
   ETS's `IsActive` flags and its download image is built during the import.
+  `export` (M3) writes a signed `.knxproj` from the model and the devices'
+  knxprods (`merge` joins one manufacturer's `Catalog.xml`/`Hardware.xml`).
 - `knxcfg` — CLI (`main.rs`, `product_store.rs`, `download.rs` plan → cEMI
   frames) + TUI (`tui.rs`; typed values are validated before they are taken).
 
@@ -125,6 +127,7 @@ knxcfg object-set <ia> <object> <setting> <value>  # flag on/off/default, priori
 knxcfg edit <ia> [--knxprod <file>]            # TUI: Tab=pages, Enter=edit, s=save, q=quit
 knxcfg probe <h2p> | form <h2p> | memory <h2p> | tables <h2p>   [--knxprod <file>]
 knxcfg import <file.knxproj> [--force]         # into this project; unpacks missing product data to vendor/
+knxcfg export <file.knxproj> [--signing-key K] # for ETS; signed with K or ~/.config/knxcfg/ets-signing-key.pem
 knxcfg download <ia> [--knxprod F] [--partial] [--frames]   # dry run: image, tables, plan
 knxcfg download <ia> --send [-i ...]           # load it into the device (checks every answer)
 knxcfg interfaces                              # hidraw devices, KNX USB interfaces marked
@@ -147,7 +150,7 @@ project `vendor/` → global store (`$XDG_DATA_HOME/knxcfg/knxprod`, default
 
 ## Milestones
 Done: M0 skeleton · M1 knxprod parser · M1.5 form engine · M1.6 project
-editing + TUI · M2 `.knxproj` import.
+editing + TUI · M2 `.knxproj` import · M3 `.knxproj` export.
 **M5** (download builder): the parameter image, tables and plan are built
 for all five sample products (System 7 and System B). The System 7 tables are
 checked against the ETS5 oracle (`crates/knx-prod/tests/oracle.rs`). For the
@@ -216,8 +219,11 @@ over KNXnet/IP give the same device state as ETS's for the BE-02001.02
 IP router (coupler) all but three ETS-computed octets. Segment masks are
 honoured (ETS does not write octets with mask 00h). `tools/vm.py` operates
 ETS in the VM.
-Next:
-finish **M4** · **M3** `.knxproj` export · **M6** hardening.
+**M3** (`.knxproj` export): `knxcfg export <file> [--signing-key <pem>]` writes
+a project ETS 5.7.4 imports; its download from ETS equals knxcfg's in knx-sim
+(see "Export" in `docs/knxproj-format.md`). ETS needs the project signed; the
+key is not part of knxcfg.
+Next: finish **M4** · **M6** hardening.
 
 ## Known loose ends
 - Not supported (reported, not silent): KNX Data Secure (download only works
