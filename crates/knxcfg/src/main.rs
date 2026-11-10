@@ -12,6 +12,7 @@ mod bus;
 mod download;
 mod ets_sign;
 mod product_store;
+mod readback;
 mod tui;
 
 #[derive(Parser)]
@@ -216,6 +217,19 @@ enum Cmd {
         #[arg(short, long)]
         interface: Option<PathBuf>,
     },
+    /// Read a device's configuration over the bus and compare it with the
+    /// project (parameters, links, object settings)
+    Read {
+        ia: String,
+        /// Store what was read in the project
+        #[arg(long)]
+        save: bool,
+        #[arg(long)]
+        knxprod: Option<PathBuf>,
+        /// Interface: /dev/hidrawN or a KNXnet/IP server address (default: the only KNX USB interface)
+        #[arg(short, long)]
+        interface: Option<PathBuf>,
+    },
     /// Read device memory over the bus
     MemRead {
         /// Individual address, e.g. 1.1.1
@@ -359,6 +373,10 @@ fn main() -> Result<()> {
             let dir = resolve_project(project.as_deref())?;
             let send = send.then_some(interface.as_deref());
             cmd_download(&dir, &ia, knxprod.as_deref(), frames, partial, send)
+        }
+        Cmd::Read { ia, save, knxprod, interface } => {
+            let dir = resolve_project(project.as_deref())?;
+            cmd_read(&dir, &ia, knxprod.as_deref(), interface.as_deref(), save)
         }
         Cmd::Interfaces => bus::cmd_interfaces(),
         Cmd::DeviceInfo { ia, interface } => bus::cmd_device_info(interface.as_deref(), &ia),
@@ -1004,7 +1022,7 @@ fn cmd_download(
     let mut diffs = 0usize;
     for (id, value) in &decoded.parameters {
         let expected = ev.value(id).unwrap_or_default();
-        if !same_value(expected, value) {
+        if !knx_prod::memory::same_value(expected, value) {
             println!("  param {id}: evaluated {expected} != decoded {value}");
             diffs += 1;
         }
@@ -1049,6 +1067,142 @@ fn cmd_download(
     download::execute(&mut *t, &plan, ia.to_u16(), mask, &mut |line| println!("{line}"))?;
     println!("{ia}: download complete");
     Ok(())
+}
+
+fn cmd_read(dir: &Path, ia_str: &str, knxprod_override: Option<&Path>, interface: Option<&Path>, save: bool) -> Result<()> {
+    let ia: IndividualAddress = ia_str.parse().with_context(|| format!("invalid IA {ia_str}"))?;
+    let mut project = knx_store::load(dir)?;
+    let device = open_device(dir, &project, ia, knxprod_override)?;
+    let ap = &device.ap;
+    let format = device.knxprod.table_format(ap)?;
+    let defaults = std::collections::HashMap::new();
+    let ev = knx_prod::Evaluation::new(ap, &defaults);
+    let template = if format == knx_prod::tables::TableFormat::Coupler {
+        knx_prod::build_coupler_image(&ev, &Default::default())?
+    } else {
+        knx_prod::device_image::build_device_image_eval(&ev, format, &[])?
+    };
+    let mask = ap
+        .mask_version
+        .strip_prefix("MV-")
+        .and_then(|m| u16::from_str_radix(m, 16).ok())
+        .with_context(|| format!("bad mask version {:?}", ap.mask_version))?;
+    let app_id = knx_prod::device_image::application_id(ap)?;
+
+    // The absolute segments the download writes in full.
+    let master = if ap.load_procedure_style == "MergedProcedure" { Some(device.knxprod.master_data()?) } else { None };
+    let plan = knx_prod::download_plan(&ev, &template, master.as_ref(), knx_prod::DownloadKind::Full)?;
+    let written: Vec<u32> = plan
+        .iter()
+        .filter_map(|s| match s {
+            knx_prod::DownloadStep::AbsSegment { address, data, .. } if !data.is_empty() => Some(*address),
+            _ => None,
+        })
+        .collect();
+
+    let mut t = bus::open(interface)?;
+    let memory =
+        readback::read_memory(&mut *t, ia.to_u16(), mask, format, &app_id, &template, &written, &mut |l| println!("  {l}"))?;
+    drop(t);
+    let read = knx_prod::device_image::decode_device(ap, format, &memory, &device.values())?;
+    print_warnings(&read.warnings);
+
+    // What was read, in the project's form.
+    let short = |k: &str| knx_prod::eval::short_key(ap, k);
+    let parameters: Vec<ParameterValue> = read
+        .parameters
+        .iter()
+        .map(|(k, v)| ParameterValue { id: short(k), value: serde_yaml::Value::String(v.clone()) })
+        .collect();
+    let links: Vec<GroupObjectLink> = read
+        .links
+        .iter()
+        .map(|l| GroupObjectLink { object_number: l.asap, ga: GroupAddress::from_u16(l.ga), send: l.send })
+        .collect();
+    let objects: Vec<ObjectSettings> = read
+        .overrides
+        .iter()
+        .map(|o| ObjectSettings {
+            object_number: o.asap,
+            communication: o.communicate,
+            read: o.read,
+            write: o.write,
+            transmit: o.transmit,
+            update: o.update,
+            read_on_init: o.read_on_init,
+            priority: o.priority.and_then(|bits| {
+                [Priority::Low, Priority::High, Priority::Alert]
+                    .into_iter()
+                    .find(|p| knx_prod::tables::priority_bits(p.ets_name()) == Some(bits))
+            }),
+            ..Default::default()
+        })
+        .collect();
+    let mut from_device = DeviceInstance { ia, parameters, links, objects };
+    let mut wrapped = knx_core::Project { devices: vec![from_device], ..Default::default() };
+    wrapped.sort();
+    from_device = wrapped.devices.remove(0);
+
+    // The object texts and datapoint types are not in the device.
+    let mut current = device.instance.clone();
+    for o in &mut from_device.objects {
+        if let Some(p) = current.objects.iter().find(|p| p.object_number == o.object_number) {
+            (o.text, o.function_text, o.dpt) = (p.text.clone(), p.function_text.clone(), p.dpt.clone());
+        }
+    }
+    for p in &current.objects {
+        if (p.text.is_some() || p.function_text.is_some() || p.dpt.is_some())
+            && !from_device.objects.iter().any(|o| o.object_number == p.object_number)
+        {
+            from_device.objects.push(ObjectSettings {
+                object_number: p.object_number,
+                text: p.text.clone(),
+                function_text: p.function_text.clone(),
+                dpt: p.dpt.clone(),
+                ..Default::default()
+            });
+        }
+    }
+    let mut wrapped = knx_core::Project { devices: vec![from_device, current], ..Default::default() };
+    wrapped.sort();
+    current = wrapped.devices.pop().unwrap();
+    let from_device = wrapped.devices.pop().unwrap();
+
+    let without: Vec<String> = read.without_memory.iter().map(|k| short(k)).collect();
+    if !without.is_empty() {
+        println!("Not in the device, taken from the project: {}", without.join(", "));
+    }
+    if from_device == current {
+        println!("{ia}: the device matches the project");
+        return Ok(());
+    }
+    let yaml = |d: &DeviceInstance| serde_yaml::to_string(d).unwrap_or_default();
+    println!("{ia}: the device differs from the project");
+    print_yaml_diff(&yaml(&current), &yaml(&from_device));
+    if save {
+        let dev = project.devices.iter_mut().find(|d| d.ia == ia).ok_or_else(|| anyhow::anyhow!("device {ia} not found"))?;
+        *dev = from_device;
+        project.sort();
+        knx_store::save(dir, &project)?;
+        println!("Saved what was read to devices/{ia}.yaml");
+    }
+    Ok(())
+}
+
+/// Lines only in `old` with `-`, only in `new` with `+`.
+fn print_yaml_diff(old: &str, new: &str) {
+    let old_lines: Vec<&str> = old.lines().collect();
+    let new_lines: Vec<&str> = new.lines().collect();
+    for l in &old_lines {
+        if !new_lines.contains(l) {
+            println!("  - {l}");
+        }
+    }
+    for l in &new_lines {
+        if !old_lines.contains(l) {
+            println!("  + {l}");
+        }
+    }
 }
 
 fn cmd_add(
@@ -1768,18 +1922,7 @@ fn describe_step(step: &knx_prod::DownloadStep) -> String {
     }
 }
 
-/// Compare an evaluated and a decoded value (numbers numerically, so a
-/// float default written as `1.5E+001` matches `15`).
-fn same_value(a: &str, b: &str) -> bool {
-    if a == b {
-        return true;
-    }
-    match (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
-        // DPT 9 is lossy (11-bit mantissa).
-        (Ok(x), Ok(y)) => (x - y).abs() <= x.abs().max(y.abs()) * 0.005 + 0.01,
-        _ => a.eq_ignore_ascii_case(b),
-    }
-}
+
 
 /// Normalize a DPT given on the command line: `DPT-9`, `DPST-9-1`, `9`,
 /// `9.001` → `DPT-9` / `DPST-9-1`.

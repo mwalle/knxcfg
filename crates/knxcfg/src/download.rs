@@ -196,11 +196,11 @@ const PROPERTY_VALUE_RESPONSE: u16 = 0x3D6;
 const FILTER_TABLE_READ: u16 = 0x3C1;
 const FILTER_TABLE_RESPONSE: u16 = 0x3C2;
 const PID_OBJECT_TYPE: u8 = 1;
-const PID_TABLE_REFERENCE: u8 = 7;
+pub(crate) const PID_TABLE_REFERENCE: u8 = 7;
 
 /// Load states (`03_05_01 Table 92`).
 const UNLOADED: u8 = 0;
-const LOADED: u8 = 1;
+pub(crate) const LOADED: u8 = 1;
 const LOADING: u8 = 2;
 const LOAD_COMPLETING: u8 = 5;
 /// Longest a load state transition may take (`03_05_01 §4.23.2.1`).
@@ -382,7 +382,7 @@ fn step_name(step: &DownloadStep) -> String {
 
 /// `A_PropertyValue_Read` of one element at index 1; the value, empty for
 /// an error answer.
-fn property_read(c: &mut Connection, obj: u8, pid: u8) -> Result<Vec<u8>> {
+pub(crate) fn property_read(c: &mut Connection, obj: u8, pid: u8) -> Result<Vec<u8>> {
     let resp = c.request(&apdu::property_value_read(obj, pid, 1, 1), PROPERTY_VALUE_RESPONSE)?;
     property_value(&resp, obj, pid)
 }
@@ -407,7 +407,7 @@ fn property_value(resp: &[u8], obj: u8, pid: u8) -> Result<Vec<u8>> {
 
 /// The index of an interface object named by type: the first object whose
 /// `PID_OBJECT_TYPE` matches.
-fn object_index(c: &mut Connection, object: &Object) -> Result<u8> {
+pub(crate) fn object_index(c: &mut Connection, object: &Object) -> Result<u8> {
     let kind = match object {
         Object::Index(i) => return Ok(*i),
         Object::Type(t) => *t,
@@ -459,7 +459,7 @@ fn write_memory(c: &mut Connection, address: u16, data: &[u8]) -> Result<()> {
     Ok(())
 }
 
-fn hex(b: &[u8]) -> String {
+pub(crate) fn hex(b: &[u8]) -> String {
     b.iter().map(|x| format!("{x:02X}")).collect::<Vec<_>>().join(" ")
 }
 

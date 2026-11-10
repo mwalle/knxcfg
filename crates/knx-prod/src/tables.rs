@@ -704,6 +704,26 @@ pub fn go_descriptor_high(f: GroupObjectFlags) -> u8 {
     b
 }
 
+/// The settings that turn the config octet `want` (product settings) into
+/// `have` (read from a device); `None` when they are equal. Bit 5 is read on
+/// init in System B and the segment selector in System 7.
+pub fn override_from_config(asap: u16, want: u8, have: u8, system_b: bool) -> Option<ObjectOverride> {
+    if want == have {
+        return None;
+    }
+    let bit = |mask: u8| (want & mask != have & mask).then_some(have & mask != 0);
+    Some(ObjectOverride {
+        asap,
+        update: bit(0x80),
+        transmit: bit(0x40),
+        read_on_init: if system_b { bit(0x20) } else { None },
+        write: bit(0x10),
+        read: bit(0x08),
+        communicate: bit(COMMUNICATION_FLAG),
+        priority: (want & PRIORITY_MASK != have & PRIORITY_MASK).then_some(have & PRIORITY_MASK),
+    })
+}
+
 /// Communication enable bit of the config octet.
 pub const COMMUNICATION_FLAG: u8 = 0x04;
 

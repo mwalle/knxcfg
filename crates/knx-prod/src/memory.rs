@@ -224,6 +224,49 @@ pub fn check_template(ap: &ApplicationProgram) -> Result<Vec<String>> {
 /// Read the parameter values back out of a memory image: the inverse of
 /// [`build_parameter_image_eval`] for the same evaluation (same union
 /// members, same placements).
+/// Parameters that are kept nowhere in the device (no memory or property
+/// location): UI choices that only decide what else is active, and texts.
+/// With each its enumeration values (empty for other types).
+pub fn parameters_without_memory(ev: &Evaluation) -> Vec<(String, Vec<String>)> {
+    let types: HashMap<&str, &crate::ParameterType> = ev
+        .ap
+        .static_
+        .iter()
+        .flat_map(|s| s.parameter_types.iter())
+        .flat_map(|t| t.items.iter())
+        .map(|t| (t.id.as_str(), t))
+        .collect();
+    let mut out = Vec::new();
+    for scope in &ev.scopes {
+        let Some(params) = scope.static_.and_then(|s| s.parameters.as_ref()) else { continue };
+        for node in &params.nodes {
+            let ParamNode::Parameter(param) = node else { continue };
+            if param.memory.is_some() || param.property.is_some() {
+                continue;
+            }
+            let values = types
+                .get(param.parameter_type.as_str())
+                .and_then(|t| t.restriction.as_ref())
+                .map(|r| r.enumerations.iter().map(|e| e.value.clone()).collect())
+                .unwrap_or_default();
+            out.push((scope.key(&param.id), values));
+        }
+    }
+    out
+}
+
+/// Whether two parameter values are the same, numbers within what a lossy
+/// encoding keeps (DPT 9 has an 11-bit mantissa).
+pub fn same_value(a: &str, b: &str) -> bool {
+    if a == b {
+        return true;
+    }
+    match (a.trim().parse::<f64>(), b.trim().parse::<f64>()) {
+        (Ok(x), Ok(y)) => (x - y).abs() <= x.abs().max(y.abs()) * 0.005 + 0.01,
+        _ => a.eq_ignore_ascii_case(b),
+    }
+}
+
 pub fn decode_parameter_image(
     ev: &Evaluation,
     segments: &[SegmentImage],

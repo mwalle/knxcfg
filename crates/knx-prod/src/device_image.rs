@@ -209,6 +209,197 @@ pub fn build_device_image_with(
     })
 }
 
+/// What was read from a device for [`decode_device`]: the segments the
+/// download writes in full (ids as in the knxprod, data from the device) and
+/// the tables. For System 7 the tables lie in segments of which the download
+/// writes only the used part (`table_segments`), and the three table fields
+/// are empty.
+#[derive(Debug, Clone, Default)]
+pub struct DeviceMemory {
+    pub segments: Vec<SegmentImage>,
+    pub table_segments: Vec<SegmentImage>,
+    pub address_table: Vec<u8>,
+    pub association_table: Vec<u8>,
+    pub group_object_table: Vec<u8>,
+}
+
+/// A configuration read back from a device: the parameter values that differ
+/// from the defaults (full keys), the links, and the object settings that
+/// differ from the product.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct ReadConfiguration {
+    pub parameters: std::collections::BTreeMap<String, String>,
+    pub links: Vec<Link>,
+    pub overrides: Vec<ObjectOverride>,
+    /// Keys among `parameters` that are not in the device's memory: their
+    /// values come from the hints or the search.
+    pub without_memory: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Decode until the values stay the same, with `fixed` for the parameters
+/// without memory; the values and whether they settled.
+fn settle(ap: &ApplicationProgram, memory: &DeviceMemory, fixed: &HashMap<String, String>) -> Result<(HashMap<String, String>, bool)> {
+    let mut values = fixed.clone();
+    for _ in 0..10 {
+        let ev = Evaluation::new(ap, &values);
+        let mut next: HashMap<String, String> = decode_parameter_image(&ev, &memory.segments)?
+            .into_iter()
+            .filter(|(k, v)| !ev.is_forced(k) && ev.default_of(k).is_none_or(|d| !crate::memory::same_value(d, v)))
+            .collect();
+        next.extend(fixed.iter().map(|(k, v)| (k.clone(), v.clone())));
+        if next == values {
+            return Ok((values, true));
+        }
+        values = next;
+    }
+    Ok((values, false))
+}
+
+/// Decode a device's memory into a configuration (the inverse of
+/// [`build_device_image_with`]).
+///
+/// Parameters without a memory location (UI choices, texts) are not in the
+/// device: they start from `hints` (the project's values) or their defaults.
+/// Which parameters are active depends on all values, so the decoding is
+/// repeated with the values found until they stay the same. If the result
+/// does not reproduce the device's parameter memory, the enumeration values
+/// of the parameters without memory are searched for a better match (they
+/// decide which memory-backed parameters are active). Parameters set by an
+/// `Assign` or a calculation are left out.
+pub fn decode_device(
+    ap: &ApplicationProgram,
+    format: TableFormat,
+    memory: &DeviceMemory,
+    hints: &HashMap<String, String>,
+) -> Result<ReadConfiguration> {
+    let free = crate::memory::parameters_without_memory(&Evaluation::new(ap, &HashMap::new()));
+    let free_keys: HashSet<&str> = free.iter().map(|(k, _)| k.as_str()).collect();
+    let mut fixed: HashMap<String, String> =
+        hints.iter().filter(|(k, _)| free_keys.contains(k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect();
+
+    // The tables do not depend on the parameters: System B has them apart,
+    // System 7 at fixed places in the segments.
+    let (address, association, got) = if format == TableFormat::Coupler {
+        Default::default()
+    } else {
+        let template = build_device_image_eval(&Evaluation::new(ap, &HashMap::new()), format, &[])?;
+        let table = |placed: &TableImage, own: &[u8]| -> Result<Vec<u8>> {
+            match &placed.placement {
+                Some(p) => {
+                    let seg = memory
+                        .segments
+                        .iter()
+                        .chain(&memory.table_segments)
+                        .find(|s| s.id == p.segment_id)
+                        .ok_or_else(|| anyhow!("segment {} was not read", p.segment_id))?;
+                    Ok(seg.data.get(p.offset..).unwrap_or_default().to_vec())
+                }
+                None => Ok(own.to_vec()),
+            }
+        };
+        (
+            table(&template.address_table, &memory.address_table)?,
+            table(&template.association_table, &memory.association_table)?,
+            table(&template.group_object_table, &memory.group_object_table)?,
+        )
+    };
+    let links = if format == TableFormat::Coupler { Vec::new() } else { tables::read_links(format, &address, &association)? };
+
+    // How many octets of the device's segments the values do not explain;
+    // left out are the group object table (object settings) and octets the
+    // download does not write (segment mask 00h).
+    let mut settled = settle(ap, memory, &fixed)?;
+    let mismatch = |values: &HashMap<String, String>| -> Result<usize> {
+        let ev = Evaluation::new(ap, values);
+        let image = if format == TableFormat::Coupler {
+            build_coupler_image(&ev, &BTreeSet::new())?
+        } else {
+            build_device_image_eval(&ev, format, &links)?
+        };
+        let got_place = image.group_object_table.placement.as_ref();
+        let mut n = 0;
+        for seg in &image.segments {
+            let Some(dev) = memory.segments.iter().find(|s| s.id == seg.id) else { continue };
+            for (i, (a, b)) in seg.data.iter().zip(&dev.data).enumerate() {
+                let masked = seg.mask.as_ref().is_some_and(|m| m.get(i) == Some(&0));
+                let in_got = got_place.is_some_and(|p| p.segment_id == seg.id && i >= p.offset && i < p.offset + p.len);
+                if a != b && !masked && !in_got {
+                    n += 1;
+                }
+            }
+        }
+        Ok(n)
+    };
+    // Values an image cannot be built from (a union member read from the
+    // octets of another one) explain nothing.
+    let mut best = mismatch(&settled.0).unwrap_or(usize::MAX);
+    // Steepest descent: all single changes from the same values, the best
+    // one wins (taking the first improvement runs into local minima).
+    while best > 0 {
+        let mut step = None;
+        for (key, choices) in &free {
+            for v in choices {
+                if fixed.get(key).map(String::as_str) == Some(v.as_str()) {
+                    continue;
+                }
+                let mut trial = fixed.clone();
+                trial.insert(key.clone(), v.clone());
+                let Ok(candidate) = settle(ap, memory, &trial) else { continue };
+                let Ok(m) = mismatch(&candidate.0) else { continue };
+                if m < step.as_ref().map_or(best, |(b, _, _)| *b) {
+                    step = Some((m, trial, candidate));
+                }
+            }
+        }
+        let Some((m, trial, candidate)) = step else { break };
+        (best, fixed, settled) = (m, trial, candidate);
+    }
+    let (values, stable) = settled;
+
+    let mut out = ReadConfiguration::default();
+    if !stable {
+        out.warnings.push("the parameter values did not settle after 10 rounds of decoding".into());
+    }
+    if best > 0 {
+        out.warnings.push(if best == usize::MAX {
+            "no values found that reproduce the device's parameter memory".to_string()
+        } else {
+            format!("{best} octet(s) of parameter memory differ from what the values read give")
+        });
+    }
+    let ev = Evaluation::new(ap, &values);
+    out.without_memory = values.keys().filter(|k| free_keys.contains(k.as_str())).cloned().collect();
+    out.without_memory.sort();
+    out.parameters = values
+        .into_iter()
+        .filter(|(k, v)| !ev.is_forced(k) && ev.default_of(k).is_none_or(|d| !crate::memory::same_value(d, v)))
+        .collect();
+    if format == TableFormat::Coupler {
+        return Ok(out);
+    }
+    out.links = links;
+
+    // Object settings: the device's config octets against those knxcfg
+    // builds for the same values and links without settings.
+    let expected = build_device_image_with(&ev, format, &out.links, &[])?;
+    let exp = &expected.group_object_table.bytes;
+    for (asap, _) in &expected.active_group_objects {
+        let at = match format {
+            TableFormat::System7 => tables::got7_config_offset(0, *asap),
+            _ => 2 + (*asap as usize).saturating_sub(1) * 2,
+        };
+        let (Some(&want), Some(&have)) = (exp.get(at), got.get(at)) else {
+            out.warnings.push(format!("group object {asap} is not in the group object table read"));
+            continue;
+        };
+        if let Some(o) = tables::override_from_config(*asap, want, have, format == TableFormat::SystemB) {
+            out.overrides.push(o);
+        }
+    }
+    Ok(out)
+}
+
 /// Build the download image for a coupler: its parameters and the filter
 /// table that passes the group addresses `filter`.
 ///

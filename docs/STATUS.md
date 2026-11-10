@@ -132,6 +132,7 @@ knxcfg download <ia> [--knxprod F] [--partial] [--frames]   # dry run: image, ta
 knxcfg download <ia> --send [-i ...]           # load it into the device (checks every answer)
 knxcfg interfaces                              # hidraw devices, KNX USB interfaces marked
 knxcfg device-info <ia> [-i /dev/hidrawN|IP]   # mask version (DD0) over the bus
+knxcfg read <ia> [--save] [-i ...]             # read the configuration back from the device, compare/store
 knxcfg mem-read <ia> <addr> <count> [-i ...]   # hex dump; addr 0x4000 / 4000h / decimal
 knxcfg prog-ia <ia> [--serial SN] [--wait S] [-i ...]  # assign IA: programming mode, or by serial (0083:12345678)
 knxcfg go-read <ia> <object> [-i ...]          # GO value/status/config via PID_GO_DIAGNOSTICS (optional in devices)
@@ -225,7 +226,15 @@ a project ETS 5.7.4 imports; its download from ETS equals knxcfg's in knx-sim
 (see "Export" in `docs/knxproj-format.md`). ETS needs the project signed; the
 key is not part of knxcfg; instead of the key, ETS's own signing assembly can
 sign (`--signing-dll`, works with .NET Framework on Windows, not with Mono).
-Next: finish **M4** · **M6** hardening.
+**Read-back** (M5): `knxcfg read <ia>` reads what a download wrote (segments
+the plan writes in full, tables), decodes parameters, links and object
+settings (`device_image::decode_device`) and compares them with the project;
+`--save` stores them. Parameters kept nowhere in the device (UI choices,
+texts) come from the project; if the result does not reproduce the memory,
+their enumeration values are searched (slow without the project's values).
+Checked in knx-sim for System 7 and System B after a knxcfg download.
+Next: finish **M4** · **M6** hardening (read-back after an ETS download,
+error recovery).
 
 ## Known loose ends
 - Not supported (reported, not silent): KNX Data Secure (download only works
