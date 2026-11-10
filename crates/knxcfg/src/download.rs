@@ -612,6 +612,7 @@ mod live_tests {
         let mut server = Server::new("127.0.0.1:0".parse().unwrap(), desc, 0x11FB, Bus::new(vec![dev], Log::to_file(None))).unwrap();
         let addr = server.local_addr();
         let mask = server.bus.devices[0].mask;
+        let dst = server.bus.devices[0].address;
         let (tx, rx) = std::sync::mpsc::channel();
         let t = std::thread::spawn(move || {
             server.run(rx).unwrap();
@@ -619,7 +620,7 @@ mod live_tests {
         });
         let result = {
             let mut ip = IpTransport::connect(addr).unwrap();
-            execute(&mut ip, plan, 0x1101, mask, &mut |_| {})
+            execute(&mut ip, plan, dst, mask, &mut |_| {})
         };
         tx.send(Input::Command("quit".into())).unwrap();
         let mut server = t.join().unwrap();
@@ -674,6 +675,110 @@ mod live_tests {
             assert_eq!(dev.objects[lsm].lsm.as_ref().unwrap().state, load_state::LOADED);
         }
         assert_eq!(dev.objects[5].lsm.as_ref().unwrap().state, load_state::UNLOADED);
+    }
+
+    /// A device of a project and how ETS 5.7 left it in knx-sim.
+    struct EtsCase<'a> {
+        knxprod: &'a str,
+        h2p: &'a str,
+        address: u16,
+        values: &'a [(&'a str, &'a str)],
+        /// `(object, group address, sending)`
+        links: &'a [(u16, u16, bool)],
+        overrides: &'a [knx_prod::tables::ObjectOverride],
+        /// Dump of all devices after ETS's download (`refs/ets5`).
+        reference: &'a str,
+    }
+
+    /// knxcfg's download of the same configuration leaves the device as
+    /// ETS's did.
+    fn same_state_as_ets(case: &EtsCase) {
+        let refs = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../refs");
+        let (path, reference) = (refs.join("knxprod").join(case.knxprod), refs.join("ets5").join(case.reference));
+        if !path.is_file() || !reference.is_file() {
+            eprintln!("skipping: {} or {} not found", path.display(), reference.display());
+            return;
+        }
+        let kp = knx_prod::KnxProd::open(&path).unwrap();
+        let ap = kp.application_program(case.h2p).unwrap();
+        let values: HashMap<String, String> =
+            case.values.iter().map(|(k, v)| (knx_prod::eval::full_key(&ap, k), v.to_string())).collect();
+        let ev = knx_prod::Evaluation::new(&ap, &values);
+        let links: Vec<_> = case.links.iter().map(|&(asap, ga, send)| knx_prod::tables::Link { asap, ga, send }).collect();
+        let image = knx_prod::device_image::build_device_image_with(&ev, kp.table_format(&ap).unwrap(), &links, case.overrides).unwrap();
+        let master = kp.master_data().unwrap();
+        let merged = ap.load_procedure_style == "MergedProcedure";
+        let plan = knx_prod::download_plan(&ev, &image, merged.then_some(&master), knx_prod::DownloadKind::Full).unwrap();
+        let dev = knx_sim::profile::device(&path, case.h2p, case.address).unwrap();
+        let (result, dev) = run(dev, &plan);
+        result.unwrap();
+
+        let text = std::fs::read_to_string(reference).unwrap();
+        let header = format!("device {}.{}.{}", case.address >> 12, (case.address >> 8) & 0xF, case.address & 0xFF);
+        let start = text.find(&format!("{header}\n")).unwrap_or_else(|| panic!("{header} not in {}", case.reference));
+        let end = text[start + 1..].find("\ndevice ").map_or(text.len(), |e| start + 2 + e);
+        assert_eq!(dev.dump(), text[start..end], "{header}");
+    }
+
+    const BE: &str = "MDT_KP_BE_02_Universal_Interface_V32a.knxprod";
+    const AKU_KNXPROD: &str = "MDT_KP_AKU_03_Universal_Actuator_V41a.knxprod";
+    const AKU_H2P: &str = "M-0083_H-287-1_HP-00C5-41-204E";
+
+    /// Flags and priorities changed per object in the knx-sim project
+    /// (docs/ets5-findings.md).
+    #[test]
+    fn object_settings_like_ets() {
+        use knx_prod::tables::ObjectOverride;
+        same_state_as_ets(&EtsCase {
+            knxprod: BE,
+            h2p: H2P,
+            address: 0x1101,
+            values: &[],
+            links: &[(0, 0x000A, false), (0, 0x000B, true)],
+            overrides: &[
+                ObjectOverride { asap: 0, read: Some(false), write: Some(true), update: Some(true), priority: Some(0b01), ..Default::default() },
+                ObjectOverride { asap: 6, transmit: Some(false), priority: Some(0b10), ..Default::default() },
+            ],
+            reference: "knx-sim-flags-ets-dump.txt",
+        });
+        same_state_as_ets(&EtsCase {
+            knxprod: AKU_KNXPROD,
+            h2p: AKU_H2P,
+            address: 0x1102,
+            values: &[("P-12", "5")],
+            links: &[],
+            overrides: &[
+                ObjectOverride { asap: 1, read: Some(true), transmit: Some(true), read_on_init: Some(true), priority: Some(0b10), ..Default::default() },
+                ObjectOverride { asap: 3, write: Some(false), update: Some(true), ..Default::default() },
+            ],
+            reference: "knx-sim-flags-ets-dump.txt",
+        });
+    }
+
+    /// A project made with knxcfg, exported and downloaded by ETS
+    /// (docs/knxproj-format.md, "Export"): module parameters, a text
+    /// parameter, links and object settings.
+    #[test]
+    fn exported_project_like_ets() {
+        use knx_prod::tables::ObjectOverride;
+        same_state_as_ets(&EtsCase {
+            knxprod: BE,
+            h2p: H2P,
+            address: 0x1101,
+            values: &[("P-7", "50"), ("MD-2_M-2/MD-2_P-23", "Kueche"), ("MD-2_M-3/MD-2_P-24", "1")],
+            links: &[(0, 0x0A03, false), (0, 0x1900, false)],
+            overrides: &[ObjectOverride { asap: 0, read: Some(false), ..Default::default() }],
+            reference: "knxcfg-project-ets-dump.txt",
+        });
+        same_state_as_ets(&EtsCase {
+            knxprod: AKU_KNXPROD,
+            h2p: AKU_H2P,
+            address: 0x1102,
+            values: &[],
+            links: &[(8, 0x0A03, false)],
+            overrides: &[ObjectOverride { asap: 8, priority: Some(0b01), ..Default::default() }],
+            reference: "knxcfg-project-ets-dump.txt",
+        });
     }
 
     #[test]

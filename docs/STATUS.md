@@ -179,7 +179,8 @@ router object by type, so frames can only be encoded during a live download
 SCN-IP100.02 as line coupler): ETS downloads it through the tunnel by its
 individual address, the filter table and the procedure match; after clearing,
 both write only the non-zero filter table octets; and
-three octets of the router's memory differ (0112h/0113h C3h and 011Ah FFh from
+three octets of the router's memory differ (0112h/0113h C3h, main side
+repetitions on BUSY 6 instead of 3, and 011Ah `LKerror` FFh "no errors" from
 ETS, the template from knxcfg; no parameter covers them, ETS computes them).
 Not supported: the legacy procedures (`LcSlave`, `LdCtrlSetControlVariable`),
 couplers with 3.5 KiB tables (0900h–0911h) and Coupler Model 2.0 (2920h).
@@ -240,8 +241,9 @@ Next: finish **M4** · **M6** hardening.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
-`cargo build --offline` · `cargo test --offline` (134 tests, incl. the ETS5
-oracle regression test that reads `refs/knxprod` and the import of the ETS
-projects in `refs/knxproj`).
+`cargo build --offline` · `cargo test --offline` (144 tests, incl. the ETS5
+oracle regression test that reads `refs/knxprod`, the import of the ETS
+projects in `refs/knxproj`, and downloads into the simulator that must leave
+the devices as ETS's downloads did, `refs/ets5/*-ets-dump.txt`).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),
 zip, base64, clap, anyhow, thiserror, ratatui 0.28, crossterm 0.27.

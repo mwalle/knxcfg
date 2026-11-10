@@ -334,8 +334,12 @@ memory writes by the segment masks.
 **Result:** knxcfg's live download of the router equals ETS's except three
 octets ETS computes without a parameter: 0112h/0113h (`MPhyRstCnt`/
 `MGrRstCnt` of the 0911h memory map, `03_05_01 Table 98`) C3h instead of the
-template's 63h, and 011Ah FFh instead of 00h. The rule behind them is not
-known (one example only). knxcfg wrote the whole filter table where ETS
+template's 63h, and 011Ah FFh instead of 00h. By `03_05_01 §5.2.2.1` the
+repetition counters hold the repetitions on BUSY in bits 7–5 and on NACK in
+bits 2–0: ETS sets 6 BUSY and 3 NACK repetitions on the main side, the
+template has 3 and 3 (the sub side, 0114h/0115h, keeps 63h). 011Ah is `LKerror`,
+where FFh means "no errors". What decides the main side values is not known
+(one example only). knxcfg wrote the whole filter table where ETS
 writes only the non-zero octets; it now does the same after a clear (one
 `A_FilterTable_Write 01 02 01 0C` instead of 745).
 
