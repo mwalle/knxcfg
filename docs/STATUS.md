@@ -127,7 +127,7 @@ knxcfg object-set <ia> <object> <setting> <value>  # flag on/off/default, priori
 knxcfg edit <ia> [--knxprod <file>]            # TUI: Tab=pages, Enter=edit, s=save, q=quit
 knxcfg probe <h2p> | form <h2p> | memory <h2p> | tables <h2p>   [--knxprod <file>]
 knxcfg import <file.knxproj> [--force]         # into this project; unpacks missing product data to vendor/
-knxcfg export <file.knxproj> [--signing-key K] # for ETS; signed with K or ~/.config/knxcfg/ets-signing-key.pem
+knxcfg export <file.knxproj> [--signing-key K | --signing-dll D]  # for ETS; key K (or ~/.config/knxcfg/ets-signing-key.pem) or ETS's Knx.Ets.XmlSigning.dll (Windows)
 knxcfg download <ia> [--knxprod F] [--partial] [--frames]   # dry run: image, tables, plan
 knxcfg download <ia> --send [-i ...]           # load it into the device (checks every answer)
 knxcfg interfaces                              # hidraw devices, KNX USB interfaces marked
@@ -223,7 +223,8 @@ ETS in the VM.
 **M3** (`.knxproj` export): `knxcfg export <file> [--signing-key <pem>]` writes
 a project ETS 5.7.4 imports; its download from ETS equals knxcfg's in knx-sim
 (see "Export" in `docs/knxproj-format.md`). ETS needs the project signed; the
-key is not part of knxcfg.
+key is not part of knxcfg; instead of the key, ETS's own signing assembly can
+sign (`--signing-dll`, works with .NET Framework on Windows, not with Mono).
 Next: finish **M4** · **M6** hardening.
 
 ## Known loose ends

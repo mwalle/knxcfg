@@ -4,8 +4,9 @@
 //! `P-XXXX/project.xml` and `P-XXXX/0.xml` built from the model, the product
 //! data of the devices (`M-XXXX/`, `knx_master.xml`) copied from their
 //! knxprods, and a `<dir>.signature` for every directory. ETS imports a
-//! project only if the signatures are valid; without a signing key the
-//! archive is written unsigned.
+//! project only if the signatures are valid. A [`DirectorySigner`] makes them:
+//! [`KeySigner`] with the key, or one that runs ETS's own signing code (see
+//! knxcfg); without one the archive is written unsigned.
 //!
 //! Like ETS, the export writes only what differs from the product: parameter
 //! values the model stores, objects with links or own settings.
@@ -42,6 +43,22 @@ pub struct ExportDevice<'a> {
     pub product_name: String,
 }
 
+/// Makes the `<dir>.signature` of one directory of the archive.
+pub trait DirectorySigner {
+    /// The content of the signature file for directory `dir`, whose files
+    /// are the entries of `files` below `dir/`.
+    fn sign(&self, files: &BTreeMap<String, Vec<u8>>, dir: &str) -> Result<String>;
+}
+
+/// Signs with the key ETS checks project signatures with.
+pub struct KeySigner(pub RsaPrivateKey);
+
+impl DirectorySigner for KeySigner {
+    fn sign(&self, files: &BTreeMap<String, Vec<u8>>, dir: &str) -> Result<String> {
+        sign_directory(files, dir, &self.0)
+    }
+}
+
 /// The key ETS checks project signatures with (RSA, PKCS#8 PEM).
 pub fn read_signing_key(path: &Path) -> Result<RsaPrivateKey> {
     let pem = std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
@@ -52,7 +69,7 @@ pub fn read_signing_key(path: &Path) -> Result<RsaPrivateKey> {
 pub fn export(
     project: &Project,
     devices: &[ExportDevice],
-    key: Option<&RsaPrivateKey>,
+    signer: Option<&dyn DirectorySigner>,
     dest: &Path,
 ) -> Result<Vec<String>> {
     let mut warnings = Vec::new();
@@ -71,10 +88,10 @@ pub fn export(
             dirs.insert(dir.to_string());
         }
     }
-    match key {
-        Some(key) => {
+    match signer {
+        Some(signer) => {
             for dir in &dirs {
-                let signature = sign_directory(&files, dir, key)?;
+                let signature = signer.sign(&files, dir).with_context(|| format!("signing {dir}"))?;
                 files.insert(format!("{dir}.signature"), signature.into_bytes());
             }
         }

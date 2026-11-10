@@ -152,6 +152,19 @@ product's.
   ("Projektdatei hat keine gültige Signatur"), also with an older schema. The
   key is not part of knxcfg: `--signing-key <pem>` or
   `~/.config/knxcfg/ets-signing-key.pem`; without one the file is unsigned.
+- Alternatively `--signing-dll <Knx.Ets.XmlSigning.dll>` signs with ETS's own
+  code: a helper (`crates/knxcfg/src/ets_signer/EtsSign.cs`, compiled once into
+  the cache directory) calls the assembly's internal
+  `XmlSigning.SignDirectory(dir, false, { ".chw" })` by reflection; it writes
+  `<dir>.signature` (with a UTF-8 BOM) next to the directory. On Windows with
+  .NET Framework this gives exactly ETS's signatures (checked in the VM: both
+  directories of the knx-sim9 export, byte for byte apart from the BOM). On
+  Linux the helper runs under Mono with `libshlwapi.so`
+  (`ets_signer/shlwapi.c`) for the assembly's `PathRelativePathTo` call, but
+  Mono 6.12 cannot run the obfuscated assemblies: ETS 5.7.4's fails with
+  `index < meta->heap_strings.size` while loading, the 5.6 converter build's
+  `SignDirectory` with "Invalid IL code". Debian has no Microsoft .NET runtime;
+  whether that runs it is not tried.
 
 Checked: ETS's download of an exported project (knx-sim's devices with flags,
 priorities and links; and a project made with `knxcfg add/link/device-set/

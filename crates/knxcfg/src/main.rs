@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 mod bus;
 mod download;
+mod ets_sign;
 mod product_store;
 mod tui;
 
@@ -155,8 +156,12 @@ enum Cmd {
         file: PathBuf,
         /// Key for the project signature ETS checks (RSA, PKCS#8 PEM); default
         /// ~/.config/knxcfg/ets-signing-key.pem if it exists
-        #[arg(long)]
+        #[arg(long, conflicts_with = "signing_dll")]
         signing_key: Option<PathBuf>,
+        /// Sign with ETS's own Knx.Ets.XmlSigning.dll instead of a key (needs
+        /// .NET Framework on Windows; Mono cannot run the ETS 5.6/5.7 assembly)
+        #[arg(long)]
+        signing_dll: Option<PathBuf>,
     },
     /// Import an ETS .knxproj file into this project (M2). Product data the
     /// store does not have yet is unpacked from the file into vendor/
@@ -341,9 +346,12 @@ fn main() -> Result<()> {
             let dir = resolve_project(project.as_deref())?;
             cmd_edit(&dir, &ia, knxprod.as_deref())
         }
-        Cmd::Export { file, signing_key } => {
-            cmd_export(&resolve_project(project.as_deref())?, &file, signing_key.as_deref())
-        }
+        Cmd::Export { file, signing_key, signing_dll } => cmd_export(
+            &resolve_project(project.as_deref())?,
+            &file,
+            signing_key.as_deref(),
+            signing_dll.as_deref(),
+        ),
         Cmd::Import { file, force } => {
             cmd_import(&resolve_project(project.as_deref())?, &file, force)
         }
@@ -1476,17 +1484,20 @@ fn cmd_edit(dir: &Path, ia_str: &str, knxprod_override: Option<&Path>) -> Result
     Ok(())
 }
 
-fn cmd_export(dir: &Path, file: &Path, signing_key: Option<&Path>) -> Result<()> {
+fn cmd_export(dir: &Path, file: &Path, signing_key: Option<&Path>, signing_dll: Option<&Path>) -> Result<()> {
     let project = knx_store::load(dir)?;
     let default_key = std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
         .map(|c| c.join("knxcfg/ets-signing-key.pem"));
-    let key_path = match signing_key {
-        Some(p) => Some(p.to_path_buf()),
-        None => default_key.filter(|p| p.is_file()),
+    let signer: Option<Box<dyn knx_proj::export::DirectorySigner>> = match (signing_key, signing_dll) {
+        (_, Some(dll)) => Some(Box::new(ets_sign::DllSigner::new(dll)?)),
+        (Some(key), None) => Some(Box::new(knx_proj::export::KeySigner(knx_proj::export::read_signing_key(key)?))),
+        (None, None) => match default_key.filter(|p| p.is_file()) {
+            Some(key) => Some(Box::new(knx_proj::export::KeySigner(knx_proj::export::read_signing_key(&key)?))),
+            None => None,
+        },
     };
-    let key = key_path.as_deref().map(knx_proj::export::read_signing_key).transpose()?;
 
     let mut opened = Vec::new();
     for d in project.topology.iter().flat_map(|a| &a.lines).flat_map(|l| &l.devices) {
@@ -1514,13 +1525,13 @@ fn cmd_export(dir: &Path, file: &Path, signing_key: Option<&Path>) -> Result<()>
             }
         })
         .collect();
-    let warnings = knx_proj::export::export(&project, &devices, key.as_ref(), file)?;
+    let warnings = knx_proj::export::export(&project, &devices, signer.as_deref(), file)?;
     print_warnings(&warnings);
     println!(
         "Exported \"{}\" to {}{}",
         project.meta.name,
         file.display(),
-        if key.is_some() { "" } else { " (unsigned)" }
+        if signer.is_some() { "" } else { " (unsigned)" }
     );
     Ok(())
 }
