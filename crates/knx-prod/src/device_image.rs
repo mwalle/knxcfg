@@ -177,7 +177,7 @@ pub fn build_device_image_eval(
             TableImage { bytes: address_bytes, placement: None },
             TableImage { bytes: association_bytes, placement: None },
             TableImage {
-                bytes: tables::build_group_object_table_b(&active, &linked)?,
+                bytes: tables::build_group_object_table_b(&active, &linked, max_object_number(ev.ap))?,
                 placement: None,
             },
         ),
@@ -391,6 +391,15 @@ pub enum DownloadStep {
         obj_idx: u8,
         prop_id: u8,
     },
+    /// Compare a property with the value an earlier [`DownloadStep::ReadProp`]
+    /// read (`LdCtrlCompareProp InlineData="*"`, `03_05_03 §3.9.3.6`; the
+    /// mask procedures in `knx_master.xml` write the placeholder as zeros).
+    /// A System B partial download checks this way that the new relative
+    /// segment got the address of the old one.
+    CompareLoadedProp {
+        obj_idx: u8,
+        prop_id: u8,
+    },
     Delay {
         ms: u32,
     },
@@ -490,10 +499,18 @@ pub fn download_plan(
     let mut flat = Vec::new();
     flatten_choose(ev, &steps, &mut flat);
     let steps = flat;
-    let checks = device_checks(ev)?;
+    let mut checks = device_checks(ev)?;
 
     let app_id = application_id(ap)?;
     let pei_type: u8 = ap.pei_type.parse().unwrap_or(0);
+    // Pre-download verification of a System B partial download: the
+    // application must be loaded and have the same id (`03_05_03 §3.9.3.5`).
+    if kind == DownloadKind::Partial && ap.load_procedure_style == "MergedProcedure" {
+        checks.push(DownloadStep::CompareProp { obj_idx: 4, prop_id: 5, inline_data: vec![1] });
+        checks.push(DownloadStep::CompareProp { obj_idx: 4, prop_id: 13, inline_data: app_id.to_vec() });
+    }
+    // Properties read by LdCtrlLoadImageProp so far.
+    let mut loaded: Vec<(u8, u8)> = Vec::new();
 
     let mut out = Vec::new();
     for (i, step) in steps.iter().enumerate() {
@@ -602,12 +619,22 @@ pub fn download_plan(
                 pei_type,
                 app_id,
             },
-            LoadStep::CompareProp(s) => DownloadStep::CompareProp {
-                obj_idx: b(&s.obj_idx, "ObjIdx")?,
-                prop_id: b(&s.prop_id, "PropId")?,
-                inline_data: parse_hex(&s.inline_data)
-                    .with_context(|| format!("load step {}: InlineData", i + 1))?,
-            },
+            LoadStep::CompareProp(s) => {
+                let obj_idx = b(&s.obj_idx, "ObjIdx")?;
+                let prop_id = b(&s.prop_id, "PropId")?;
+                let placeholder = s.inline_data.trim() == "*"
+                    || s.inline_data.trim().chars().all(|c| c == '0');
+                if placeholder && loaded.contains(&(obj_idx, prop_id)) {
+                    DownloadStep::CompareLoadedProp { obj_idx, prop_id }
+                } else {
+                    DownloadStep::CompareProp {
+                        obj_idx,
+                        prop_id,
+                        inline_data: parse_hex(&s.inline_data)
+                            .with_context(|| format!("load step {}: InlineData", i + 1))?,
+                    }
+                }
+            }
             LoadStep::AbsSegment(s) => {
                 let address = n(&s.address, "Address")?;
                 let size = n(&s.size, "Size")? as usize;
@@ -709,10 +736,11 @@ pub fn download_plan(
                     verify: s.verify == "true",
                 }
             }
-            LoadStep::LoadImageProp(s) => DownloadStep::ReadProp {
-                obj_idx: b(&s.obj_idx, "ObjIdx")?,
-                prop_id: b(&s.prop_id, "PropId")?,
-            },
+            LoadStep::LoadImageProp(s) => {
+                let (obj_idx, prop_id) = (b(&s.obj_idx, "ObjIdx")?, b(&s.prop_id, "PropId")?);
+                loaded.push((obj_idx, prop_id));
+                DownloadStep::ReadProp { obj_idx, prop_id }
+            }
             LoadStep::Delay(s) => DownloadStep::Delay { ms: n(&s.milliseconds, "MilliSeconds")? },
             LoadStep::MapError(s) => DownloadStep::MapError {
                 original: n(&s.original_error, "OriginalError")?,
@@ -734,7 +762,36 @@ pub fn download_plan(
         });
         out.extend(then);
     }
+    // A System B application with only application program 1 (no fragments
+    // for merge points 3 and 5): the steps of load state machine 5 are not
+    // executed (`03_05_03 §3.9.3.4–§3.9.3.7`), except its Unload in a complete
+    // download. ETS 5.7 does the same (knx-sim step 5).
+    let only_ap1 = !procedures.iter().any(|p| matches!(p.merge_id.trim(), "3" | "5") && !p.steps.is_empty());
+    if image.format == TableFormat::SystemB && only_ap1 {
+        out.retain(|s| match s {
+            DownloadStep::Unload { object: Object::Index(5) } => kind == DownloadKind::Full,
+            other => !uses_object(other, 5),
+        });
+    }
     Ok(out)
+}
+
+/// Whether a step addresses the interface object (load state machine) `idx`.
+fn uses_object(step: &DownloadStep, idx: u8) -> bool {
+    match step {
+        DownloadStep::Unload { object } | DownloadStep::Load { object } | DownloadStep::LoadCompleted { object } => {
+            *object == Object::Index(idx)
+        }
+        DownloadStep::WriteProp { object, .. } => *object == Object::Index(idx),
+        DownloadStep::ReadProp { obj_idx, .. }
+        | DownloadStep::CompareProp { obj_idx, .. }
+        | DownloadStep::CompareLoadedProp { obj_idx, .. }
+        | DownloadStep::WriteRelMem { obj_idx, .. } => *obj_idx == idx,
+        DownloadStep::AbsSegment { lsm_idx, .. }
+        | DownloadStep::TaskSegment { lsm_idx, .. }
+        | DownloadStep::RelSegment { lsm_idx, .. } => *lsm_idx == idx,
+        _ => false,
+    }
 }
 
 /// The writes of a System 7 address or association table whose segment
@@ -846,6 +903,12 @@ fn table_of(image: &DeviceImage, idx: u8) -> Option<&TableImage> {
         3 => Some(&image.group_object_table),
         _ => None,
     }
+}
+
+/// The application's highest group object number over all modes and module
+/// instances: the length of a System B group object table.
+fn max_object_number(ap: &ApplicationProgram) -> u16 {
+    tables::group_objects(ap).iter().map(|(a, _)| *a).max().unwrap_or(0)
 }
 
 /// The 5-octet application id: manufacturer (2), application number (2),

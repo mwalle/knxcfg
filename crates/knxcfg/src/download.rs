@@ -20,6 +20,7 @@ use knx_transport::apdu::{self, apci};
 use knx_transport::cemi::{self, tpci};
 use knx_transport::mgmt::{self, Connection};
 use knx_transport::{CemiFrame, Transport};
+use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 /// Data octets per `A_Memory_Write` in a standard frame: 15 TPDU octets
@@ -73,7 +74,7 @@ pub fn plan_to_frames(plan: &[DownloadStep], dst: u16) -> Result<Vec<CemiFrame>>
                 let _ = inline_data;
                 data(&mut frames, &apdu::property_value_read(*obj_idx, *prop_id, 1, 1));
             }
-            DownloadStep::ReadProp { obj_idx, prop_id } => {
+            DownloadStep::ReadProp { obj_idx, prop_id } | DownloadStep::CompareLoadedProp { obj_idx, prop_id } => {
                 data(&mut frames, &apdu::property_value_read(*obj_idx, *prop_id, 1, 1));
             }
             DownloadStep::WriteProp { object, prop_id, data: d, .. } => {
@@ -218,6 +219,7 @@ pub fn execute(t: &mut dyn Transport, plan: &[DownloadStep], dst: u16, mask: u16
         bail!("the device has mask {found:04X}h, the application needs {mask:04X}h; nothing was loaded");
     }
     log(&format!("  1 connected, mask {found:04X}h"));
+    let mut loaded = HashMap::new();
     for (i, step) in rest.iter().enumerate() {
         let n = i + 2;
         // The connection ends with Disconnect or Restart; only delays may
@@ -238,13 +240,21 @@ pub fn execute(t: &mut dyn Transport, plan: &[DownloadStep], dst: u16, mask: u16
                 return Ok(());
             }
             DownloadStep::Connect => bail!("step {n}: a second Connect is not supported"),
-            _ => run_step(&mut c, n, step, log).with_context(|| format!("step {n} ({})", step_name(step)))?,
+            _ => run_step(&mut c, n, step, &mut loaded, log).with_context(|| format!("step {n} ({})", step_name(step)))?,
         }
     }
     c.close()
 }
 
-fn run_step(c: &mut Connection, n: usize, step: &DownloadStep, log: &mut dyn FnMut(&str)) -> Result<()> {
+/// One step; `loaded` holds the values of [`DownloadStep::ReadProp`] by
+/// object index and PID.
+fn run_step(
+    c: &mut Connection,
+    n: usize,
+    step: &DownloadStep,
+    loaded: &mut HashMap<(u8, u8), Vec<u8>>,
+    log: &mut dyn FnMut(&str),
+) -> Result<()> {
     match step {
         DownloadStep::CompareProp { obj_idx, prop_id, inline_data } => {
             let found = property_read(c, *obj_idx, *prop_id)?;
@@ -263,6 +273,15 @@ fn run_step(c: &mut Connection, n: usize, step: &DownloadStep, log: &mut dyn FnM
         DownloadStep::ReadProp { obj_idx, prop_id } => {
             let v = property_read(c, *obj_idx, *prop_id)?;
             log(&format!("{n:3} object {obj_idx} property {prop_id} = {}", hex(&v)));
+            loaded.insert((*obj_idx, *prop_id), v);
+        }
+        DownloadStep::CompareLoadedProp { obj_idx, prop_id } => {
+            let before = loaded.get(&(*obj_idx, *prop_id)).with_context(|| format!("object {obj_idx} property {prop_id} was not read before"))?;
+            let now = property_read(c, *obj_idx, *prop_id)?;
+            if now != *before {
+                bail!("object {obj_idx} property {prop_id} is {}, was {} (the device moved the segment; a complete download is needed)", hex(&now), hex(before));
+            }
+            log(&format!("{n:3} object {obj_idx} property {prop_id} = {} unchanged", hex(&now)));
         }
         DownloadStep::WriteProp { object, prop_id, data, verify } => {
             let idx = object_index(c, object)?;
@@ -549,6 +568,7 @@ mod live_tests {
         let desc = Description { individual_address: 0x11FA, serial: [0; 6], mac: [0; 6], name: "t".into() };
         let mut server = Server::new("127.0.0.1:0".parse().unwrap(), desc, 0x11FB, Bus::new(vec![dev], Log::to_file(None))).unwrap();
         let addr = server.local_addr();
+        let mask = server.bus.devices[0].mask;
         let (tx, rx) = std::sync::mpsc::channel();
         let t = std::thread::spawn(move || {
             server.run(rx).unwrap();
@@ -556,7 +576,7 @@ mod live_tests {
         });
         let result = {
             let mut ip = IpTransport::connect(addr).unwrap();
-            execute(&mut ip, plan, 0x1101, 0x0705, &mut |_| {})
+            execute(&mut ip, plan, 0x1101, mask, &mut |_| {})
         };
         tx.send(Input::Command("quit".into())).unwrap();
         let mut server = t.join().unwrap();
@@ -577,6 +597,40 @@ mod live_tests {
         assert!(dump.contains("  pid 13: 00 83 00 B6 32\n"), "{dump}");
         assert!(dump.contains("  4000: 02 -- -- 00 0A --"), "{dump}");
         assert!(dump.contains("  4200: -- 01 01 00 --"), "{dump}");
+    }
+
+    /// The AKU-02UP.03 (System B): complete, then partial download.
+    #[test]
+    fn system_b_complete_and_partial() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../refs/knxprod/MDT_KP_AKU_03_Universal_Actuator_V41a.knxprod");
+        if !path.is_file() {
+            return;
+        }
+        const AKU: &str = "M-0083_H-287-1_HP-00C5-41-204E";
+        let kp = knx_prod::KnxProd::open(&path).unwrap();
+        let ap = kp.application_program(AKU).unwrap();
+        let master = kp.master_data().unwrap();
+        let values = HashMap::new();
+        let ev = knx_prod::Evaluation::new(&ap, &values);
+        let image = knx_prod::device_image::build_device_image_eval(&ev, kp.table_format(&ap).unwrap(), &[]).unwrap();
+        let mut plan = knx_prod::download_plan(&ev, &image, Some(&master), knx_prod::DownloadKind::Full).unwrap();
+        // Both downloads over one simulated connection: the partial one
+        // follows the complete one (its Restart ends the first part).
+        let partial = knx_prod::download_plan(&ev, &image, Some(&master), knx_prod::DownloadKind::Partial).unwrap();
+        let dev = knx_sim::profile::device(&path, AKU, 0x1101).unwrap();
+        let (result, dev) = run(dev, &plan);
+        result.unwrap();
+        let reference = |d: &Device| d.objects[4].properties.iter().find(|p| p.id == 7).unwrap().elements[0].clone();
+        let before = reference(&dev);
+        assert_ne!(before, [0, 0, 0, 0]);
+        plan = partial;
+        let (result, dev) = run(dev, &plan);
+        result.unwrap();
+        assert_eq!(reference(&dev), before);
+        for lsm in 1..=4 {
+            assert_eq!(dev.objects[lsm].lsm.as_ref().unwrap().state, load_state::LOADED);
+        }
+        assert_eq!(dev.objects[5].lsm.as_ref().unwrap().state, load_state::UNLOADED);
     }
 
     #[test]

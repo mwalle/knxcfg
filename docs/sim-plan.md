@@ -1,7 +1,7 @@
 # knx-sim: verifying downloads against ETS without real devices
 
-Status (2026-11-10): steps 1 and 2 done, `crates/knx-sim`; tested with ETS
-5.7.4. Next is step 3.
+Status (2026-11-10): steps 1, 2, 3 and 5 done, `crates/knx-sim`; tested with
+ETS 5.7.4.
 
 Run it with
 `cargo run -p knx-sim -- --listen 192.168.77.1 --product 1.1.1:<knxprod>[:<h2p>] --log <file>`
@@ -96,7 +96,7 @@ can be built and tested against it while the USB path is blocked.
 4. Coupler (mask 091A, the IP router of the real project): filter table and
    procedure. ETS might want to configure an IP router over IP instead of
    through the bus; to be found out.
-5. System B device and the partial download.
+5. System B device and the partial download. **Done**, see "Step 5 results".
 6. `Links` order: change one sending address in an ETS copy of the project,
    export, look at `@Links` (no emulator needed).
 
@@ -239,6 +239,61 @@ Result: `knxcfg download 1.1.1 --send -i 192.168.77.1` of the imported
 `download::live_tests` runs the same against knx-sim on localhost, and checks
 that a device with another hardware type stops the download before
 anything is loaded.
+
+## Step 5 results
+
+Device: AKU-02UP.03 (mask 07B0h, `MergedProcedure`, only application
+program 1), at 1.1.2 in the ETS project "knx-sim", default parameters.
+
+**Simulated System B device.** The profile now takes the loadable parts from
+the mask's `<InterfaceObjects>` (07B0h: objects 1–5, the group object table
+as object 3 with type 9) and the memory for relative segments from its
+`<MemorySegments>` (07B0h lists them only in the legacy block). A
+`Data Relative Allocation` (event 03h 0Bh, `03_05_02 §3.31.3.4`) places the
+segment behind the others in the first EEPROM segment, sets
+`PID_TABLE_REFERENCE` (4 octets) and fills it if mode bit 0 is set; a new
+allocation of the same size gets the same address. The dump shows relative
+segments by content. The hardware type comes from knx-prod's plan (a
+hardware property parameter here, not `LdCtrlCompareProp`).
+
+**What ETS 5.7 does (complete download):** device descriptor,
+`A_Authorize`, then `A_PropertyDescription_Read` of object 2 `PID_TABLE` (23):
+without that property ETS stops ("Es wurde versucht, einen geschützten oder
+nicht v…"). The association table's entry format is to be discovered from
+that description (`03_05_01 §4.3.23.3`, PDT_GENERIC_02 or _04); the
+simulation answers PDT_GENERIC_04, which matches knx-prod's 4-octet entries.
+What MDT's devices answer is not known, and the answer decides what ETS
+writes. Then serial number, manufacturer, version, hardware type, order
+info; Unload 5…1; Load/RelSegment for 4 (348 octets, fill 00), 3, 1, 2; the
+parameter segment (only the octets that are not 00: the segment was
+filled), group object table, association table, address table, each after
+reading its `PID_TABLE_REFERENCE` and each write read back; PID 13 of object
+4; LoadCompleted 4…1; stamps (PID 27) of objects 1–4; restart. LSM 5 is
+unloaded but not loaded, as `03_05_03 §3.9.3.4` says for "only AP 1". The
+group object table has 60 descriptors (122 octets): the application's
+highest object number, not the highest active one.
+
+**Partial download** (a parameter changed in ETS): reads serial number,
+load state and PID 13 of object 4, load state of object 5, identity
+properties, stamps of objects 3/4 and `PID_TABLE_REFERENCE` of object 4;
+Unload/Load 4, RelSegment without fill, reads the reference again
+(`LdCtrlCompareProp InlineData="*"`, `03_05_03 §3.9.3.6`), writes a
+difference of the parameter segment, PID 13, LoadCompleted 4, stamps,
+restart. Nothing of LSM 5.
+
+**knxcfg changes** (`knx-prod`): the group object table length is the
+application's highest object number; LSM 5 steps are dropped for an
+application without fragments for merge points 3 and 5 (Unload 5 stays in a
+complete download); a placeholder `CompareProp` after a `LoadImageProp` of
+the same property compares with the value read before
+(`CompareLoadedProp`; knxcfg compared with literal zeros); a partial System B
+download first checks that the application is loaded and has the same id.
+
+**Result:** knxcfg's complete download over KNXnet/IP gives the same dump as
+ETS's; knxcfg's complete plus partial download gives the same dump as ETS's
+partial download after the complete one (the changed parameter at 40ABh).
+Not tried: what ETS does if the device moves the segment in a partial
+download.
 
 ## Operating ETS
 

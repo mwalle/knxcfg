@@ -1576,6 +1576,9 @@ fn describe_step(step: &knx_prod::DownloadStep) -> String {
         ),
         S::ClearFilterTable { object } => format!("ClearFilterTable {object}"),
         S::ReadProp { obj_idx, prop_id } => format!("ReadProp ObjIdx={obj_idx} PropId={prop_id}"),
+        S::CompareLoadedProp { obj_idx, prop_id } => {
+            format!("CompareProp ObjIdx={obj_idx} PropId={prop_id} with the value read before")
+        }
         S::Delay { ms } => format!("Delay {ms} ms"),
         S::MapError { original, mapped } => format!("MapError {original} -> {mapped}"),
     }

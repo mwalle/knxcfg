@@ -153,8 +153,10 @@ BE-02001.02 the complete download (plan, tables, parameter image) gives the
 same device state as ETS's in knx-sim (`docs/sim-plan.md`, step 3): only
 active parameters and those set by an `Assign` or a calculation are written,
 the rest keeps the template; the System 7 tables are written in their used
-part only. The System B tables are spec/knxprod-derived and not yet compared
-with an ETS download. The plan is encoded as cEMI frames
+part only. For the AKU-02UP.03 (System B) the complete and the partial
+download also give ETS's device state (group object table over all object
+numbers, no LSM 5 steps without a second application program, the partial
+download's segment address check). The plan is encoded as cEMI frames
 (`download --frames`) except `LdCtrlWriteRelMem`, which needs the device's
 `PID_TABLE_REFERENCE` at run time.
 **Couplers** (masks 0912h/091Ah, property based configuration): the image is the
@@ -199,11 +201,11 @@ Still to do for M2: per-object flag/priority overrides (reported at import,
 not yet applied to the tables), confirming that the first `Links` entry is the
 sending address, and keeping the data listed under "Not imported" in
 `docs/knxproj-format.md`, which M3 needs (D7 Buildings/Functions).
-**knx-sim** (`docs/sim-plan.md`, in progress): steps 1–3 done. knxcfg's live
-download of the BE-02001.02 over KNXnet/IP gives the same device state as
-ETS's live download (with a link and without). `tools/vm.py` operates ETS in
-the VM.
-Next: **knx-sim** step 4 (coupler) or 5 (System B, partial download) · finish **M2** ·
+**knx-sim** (`docs/sim-plan.md`, in progress): steps 1–3 and 5 done. knxcfg's
+live downloads over KNXnet/IP give the same device state as ETS's for the
+BE-02001.02 (System 7) and the AKU-02UP.03 (System B, complete and partial).
+`tools/vm.py` operates ETS in the VM.
+Next: **knx-sim** step 6 (`Links` order) and step 4 (coupler) · finish **M2** ·
 finish **M4** · **M3** `.knxproj` export · **M6** hardening.
 
 ## Known loose ends
@@ -212,8 +214,8 @@ finish **M4** · **M3** `.knxproj` export · **M6** hardening.
   parameters other than the device hardware checks, calculations outside
   the JS subset (KLIC's Steinhart-Hart tables), couplers other than masks
   0912h/091Ah.
-- Unverified against ETS: System B table bytes, the partial download, the
-  communication flag of unlinked System B objects, rounding of calculation
+- Unverified against ETS: System B tables with links, the communication flag
+  of unlinked System B objects, rounding of calculation
   results into integer parameters.
 - The memory encoder rejects `TypeText` parameters ("parameter type has no size")
   and an IP address default of `0`, so MDT application `A-0133-10-9E94` (mask 07B0)
@@ -222,7 +224,7 @@ finish **M4** · **M3** `.knxproj` export · **M6** hardening.
 - Rust = Debian apt package (no rustup; leftover `~/.cargo` was removed).
 
 ## Build/test
-`cargo build --offline` · `cargo test --offline` (121 tests, incl. the ETS5
+`cargo build --offline` · `cargo test --offline` (131 tests, incl. the ETS5
 oracle regression test that reads `refs/knxprod` and the import of the ETS
 projects in `refs/knxproj`).
 Deps via apt (already installed): serde, serde_yaml, quick-xml(+serialize),

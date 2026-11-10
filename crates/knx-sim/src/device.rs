@@ -14,7 +14,9 @@ pub mod pdt {
     pub const CONTROL: u8 = 0x00;
     pub const UNSIGNED_CHAR: u8 = 0x02;
     pub const UNSIGNED_INT: u8 = 0x04;
+    pub const UNSIGNED_LONG: u8 = 0x06;
     pub const GENERIC_02: u8 = 0x12;
+    pub const GENERIC_04: u8 = 0x14;
     pub const GENERIC_05: u8 = 0x15;
     pub const GENERIC_06: u8 = 0x16;
     pub const GENERIC_08: u8 = 0x18;
@@ -30,6 +32,7 @@ pub mod pid {
     pub const RUN_STATE_CONTROL: u8 = 6;
     pub const TABLE_REFERENCE: u8 = 7;
     pub const PROGRAM_VERSION: u8 = 13;
+    pub const TABLE: u8 = 23;
     /// Download stamp of objects 1–4 (`Stamp_SystemB` resources of mask
     /// 0705h in `knx_master.xml`).
     pub const STAMP: u8 = 27;
@@ -142,6 +145,8 @@ pub struct Lsm {
     /// Memory address that mirrors the state (memory mapped load status of
     /// mask 0705h, `GroupAddressTableLoadStatus` …).
     pub status_address: Option<u16>,
+    /// The relative segment allocated for the part: address and size.
+    pub segment: Option<(u16, u32)>,
 }
 
 impl Lsm {
@@ -199,6 +204,9 @@ pub struct Device {
     /// Run state of the application: running after a restart with the
     /// application loaded.
     running: bool,
+    /// Memory for relative segments (`LoadEvent Data Relative Allocation`):
+    /// start and end (exclusive).
+    pub allocation: Option<(u32, u32)>,
     conn: Option<TlConnection>,
 }
 
@@ -229,27 +237,33 @@ impl Device {
             memory: vec![0; 0x10000],
             written: vec![false; 0x10000],
             running: false,
+            allocation: None,
             conn: None,
         }
     }
 
-    /// Add the interface object of a loadable part at `index` (objects 1–4
-    /// of System 7: address table, association table, application, PEI
-    /// program), with its load state machine.
-    pub fn add_loadable(&mut self, index: usize, kind: u16, status_address: Option<u16>) {
+    /// Add the interface object of a loadable part at `index`, with its load
+    /// state machine: System 7 objects 1–4 (address table, association
+    /// table, application, PEI program), System B objects 1–5 (the group
+    /// object table, type 9, as object 3). `table_reference` is the size of
+    /// `PID_TABLE_REFERENCE` (2 octets for 0705h's tables, 4 for 07B0h), or
+    /// `None` for no such property.
+    pub fn add_loadable(&mut self, index: usize, kind: u16, status_address: Option<u16>, table_reference: Option<usize>) {
         let mut o = Object::new(kind);
         let mut control = Property::new(pid::LOAD_STATE_CONTROL, pdt::CONTROL, 10, &[0; 10]);
         control.writable = true;
         o.properties.push(control);
-        match kind {
-            1 | 2 => o.properties.push(Property::new(pid::TABLE_REFERENCE, pdt::UNSIGNED_INT, 2, &[0, 0])),
-            _ => {
-                let mut run = Property::new(pid::RUN_STATE_CONTROL, pdt::CONTROL, 10, &[0; 10]);
-                run.writable = true;
-                let mut version = Property::new(pid::PROGRAM_VERSION, pdt::GENERIC_05, 5, &[0; 5]);
-                version.writable = true;
-                o.properties.extend([run, version]);
-            }
+        match table_reference {
+            Some(2) => o.properties.push(Property::new(pid::TABLE_REFERENCE, pdt::UNSIGNED_INT, 2, &[0; 2])),
+            Some(n) => o.properties.push(Property::new(pid::TABLE_REFERENCE, pdt::UNSIGNED_LONG, n, &vec![0; n])),
+            None => {}
+        }
+        if matches!(kind, 3 | 4) {
+            let mut run = Property::new(pid::RUN_STATE_CONTROL, pdt::CONTROL, 10, &[0; 10]);
+            run.writable = true;
+            let mut version = Property::new(pid::PROGRAM_VERSION, pdt::GENERIC_05, 5, &[0; 5]);
+            version.writable = true;
+            o.properties.extend([run, version]);
         }
         let mut stamp = Property::new(pid::STAMP, pdt::GENERIC_08, 8, &[0; 8]);
         stamp.writable = true;
@@ -275,8 +289,37 @@ impl Device {
         }
     }
 
+    /// The address for a relative segment of `size` octets for `object`:
+    /// the part's previous segment if it had the same size, else the first
+    /// free place in the allocation region behind the other segments.
+    fn allocate(&self, object: usize, size: u32) -> Option<u16> {
+        if let Some((a, s)) = self.objects[object].lsm.as_ref()?.segment {
+            if s == size {
+                return Some(a);
+            }
+        }
+        let (start, end) = self.allocation?;
+        let used = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != object)
+            .filter_map(|(_, o)| o.lsm.as_ref()?.segment)
+            .map(|(a, s)| a as u32 + s)
+            .max()
+            .unwrap_or(start)
+            .max(start);
+        (used + size <= end && used + size <= 0x10000).then_some(used as u16)
+    }
+
     /// A load event written to PID_LOAD_STATE_CONTROL of `object`.
     fn load_event(&mut self, object: usize, event: &[u8], notes: &mut Vec<String>) {
+        // Data Relative Allocation (`03_05_02 §3.31.3.4`): the device places
+        // the segment.
+        let relative = (event[0] == 0x03 && event[1] == 0x0B).then(|| {
+            let size = u32::from_be_bytes([event[2], event[3], event[4], event[5]]);
+            (size, self.allocate(object, size))
+        });
         let o = &mut self.objects[object];
         let Some(lsm) = o.lsm.as_mut() else { return };
         let before = lsm.state;
@@ -292,6 +335,23 @@ impl Device {
                 match (event[1], o.kind) {
                     (0x00, 1 | 2) => o.set(pid::TABLE_REFERENCE, &event[2..4]),
                     (0x02, 3 | 4) => o.set(pid::PROGRAM_VERSION, &event[5..10]),
+                    (0x0B, _) => match relative {
+                        Some((size, Some(address))) => {
+                            lsm.segment = Some((address, size));
+                            if let Some(p) = o.properties.iter_mut().find(|p| p.id == pid::TABLE_REFERENCE) {
+                                let v = (address as u64).to_be_bytes();
+                                p.elements = vec![v[8 - p.size..].to_vec()];
+                            }
+                            if event[6] & 0x01 != 0 {
+                                let a = address as usize;
+                                self.memory[a..a + size as usize].fill(event[7]);
+                            }
+                        }
+                        _ => {
+                            lsm.state = load_state::ERROR;
+                            notes.push(format!("object {object}: no memory for a relative segment"));
+                        }
+                    },
                     _ => {}
                 }
             }
@@ -344,13 +404,30 @@ impl Device {
                 out += &format!("  pid {}: {}\n", p.id, v.join(" | "));
             }
         }
+        // Relative segments by content: the device fills them on allocation,
+        // so a client may skip octets equal to the fill value (ETS does).
+        let mut segments: Vec<(usize, (u16, u32))> = self
+            .objects
+            .iter()
+            .enumerate()
+            .filter_map(|(i, o)| Some((i, o.lsm.as_ref()?.segment?)))
+            .collect();
+        segments.sort_by_key(|(_, (a, _))| *a);
+        let in_segment = |a: usize| segments.iter().any(|(_, (s, n))| a >= *s as usize && a < *s as usize + *n as usize);
+        for (i, (start, size)) in &segments {
+            out += &format!("segment of object {i} at {start:04X}h, {size} octets\n");
+            let (start, end) = (*start as usize, *start as usize + *size as usize);
+            for row in (start..end).step_by(16) {
+                out += &format!("  {row:04X}: {}\n", hex(&self.memory[row..(row + 16).min(end)]));
+            }
+        }
         out += "memory written\n";
         for row in (0..self.memory.len()).step_by(16) {
-            if !self.written[row..row + 16].iter().any(|&w| w) {
+            if !(row..row + 16).any(|a| self.written[a] && !in_segment(a)) {
                 continue;
             }
             let cells: Vec<String> = (row..row + 16)
-                .map(|a| if self.written[a] { format!("{:02X}", self.memory[a]) } else { "--".into() })
+                .map(|a| if self.written[a] && !in_segment(a) { format!("{:02X}", self.memory[a]) } else { "--".into() })
                 .collect();
             out += &format!("  {row:04X}: {}\n", cells.join(" "));
         }
@@ -749,7 +826,7 @@ mod tests {
     fn load_state_machine() {
         use load_state::*;
         let mut d = dev();
-        d.add_loadable(1, 1, Some(0xB6EA));
+        d.add_loadable(1, 1, Some(0xB6EA), Some(2));
         let mut n = Vec::new();
         let mut event = |d: &mut Device, e: &[u8]| {
             let mut data = e.to_vec();
@@ -774,6 +851,40 @@ mod tests {
         event(&mut d, &[0x01]);
         d.receive(&ld(tpci::T_DATA_INDIVIDUAL, ETS, ME, &knx_transport::apdu::restart()), &mut n);
         assert_eq!(d.memory[0xB6EA], UNLOADED);
+    }
+
+    #[test]
+    fn relative_segments() {
+        use load_state::*;
+        let mut d = dev();
+        d.add_loadable(1, 1, None, Some(4));
+        d.add_loadable(2, 2, None, Some(4));
+        d.allocation = Some((0x4000, 0x4010));
+        let mut n = Vec::new();
+        let mut event = |d: &mut Device, obj: u8, e: &[u8]| {
+            let mut data = e.to_vec();
+            data.resize(10, 0);
+            let apdu = knx_transport::apdu::property_value_write(obj, pid::LOAD_STATE_CONTROL, 1, 1, &data);
+            *d.receive(&ld(tpci::T_DATA_INDIVIDUAL, ETS, ME, &apdu), &mut n)[0].apdu.last().unwrap()
+        };
+        let reference = |d: &Device, obj: usize| d.objects[obj].properties.iter().find(|p| p.id == pid::TABLE_REFERENCE).unwrap().elements[0].clone();
+        event(&mut d, 1, &[0x01]);
+        // 8 octets, filled with AAh.
+        assert_eq!(event(&mut d, 1, &[0x03, 0x0B, 0, 0, 0, 8, 0x01, 0xAA]), LOADING);
+        assert_eq!(reference(&d, 1), [0x00, 0x00, 0x40, 0x00]);
+        assert_eq!(&d.memory[0x4000..0x4009], &[0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0xAA, 0x00]);
+        // The next part goes behind it; too much is an error.
+        event(&mut d, 2, &[0x01]);
+        assert_eq!(event(&mut d, 2, &[0x03, 0x0B, 0, 0, 0, 8, 0, 0]), LOADING);
+        assert_eq!(reference(&d, 2), [0x00, 0x00, 0x40, 0x08]);
+        // A new load of the same size gets the same place again.
+        event(&mut d, 1, &[0x04]);
+        event(&mut d, 1, &[0x01]);
+        event(&mut d, 1, &[0x03, 0x0B, 0, 0, 0, 8, 0, 0]);
+        assert_eq!(reference(&d, 1), [0x00, 0x00, 0x40, 0x00]);
+        event(&mut d, 1, &[0x04]);
+        event(&mut d, 1, &[0x01]);
+        assert_eq!(event(&mut d, 1, &[0x03, 0x0B, 0, 0, 0, 9, 0, 0]), ERROR);
     }
 
     #[test]

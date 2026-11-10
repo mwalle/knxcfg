@@ -141,6 +141,71 @@ struct HawkConfigurationData {
     resources: Option<Resources>,
     #[serde(rename = "Procedures", default)]
     procedures: Option<Procedures>,
+    #[serde(rename = "MemorySegments", default)]
+    memory_segments: Option<MemorySegments>,
+    #[serde(rename = "InterfaceObjects", default)]
+    interface_objects: Option<InterfaceObjects>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct MemorySegments {
+    #[serde(rename = "MemorySegment", default)]
+    items: Vec<MemorySegmentXml>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct MemorySegmentXml {
+    #[serde(rename = "@MemoryType", default)]
+    memory_type: String,
+    #[serde(rename = "@Length", default)]
+    length: String,
+    #[serde(rename = "@Optional", default)]
+    optional: String,
+    #[serde(rename = "Location", default)]
+    location: Option<Location>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct InterfaceObjects {
+    #[serde(rename = "InterfaceObject", default)]
+    items: Vec<InterfaceObjectXml>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct InterfaceObjectXml {
+    #[serde(rename = "@Index", default)]
+    index: String,
+    #[serde(rename = "@ObjectType", default)]
+    object_type: String,
+    #[serde(rename = "Property", default)]
+    properties: Vec<PropertyXml>,
+}
+
+#[derive(Debug, Deserialize, Default, Clone)]
+struct PropertyXml {
+    #[serde(rename = "@PropertyID", default)]
+    id: String,
+    #[serde(rename = "@PropertyDataType", default)]
+    pdt: String,
+}
+
+/// A memory segment of a mask (`<MemorySegment>`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaskMemorySegment {
+    pub memory_type: String,
+    pub address_space: String,
+    pub start: u32,
+    pub length: u32,
+    pub optional: bool,
+}
+
+/// An interface object a mask declares (`<InterfaceObject>`), with the
+/// properties listed for it as (PID, property datatype name).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaskInterfaceObject {
+    pub index: u8,
+    pub object_type: u16,
+    pub properties: Vec<(u8, String)>,
 }
 
 #[derive(Debug, Deserialize, Default, Clone)]
@@ -209,6 +274,51 @@ impl MaskVersion {
     /// The format of a resource (`GroupAddressTable` → `AddressTable_Bcu1`).
     pub fn resource_flavour(&self, name: &str) -> Option<&str> {
         self.remote_resource(name)?.resource_type.as_ref()?.flavour.as_deref()
+    }
+
+    /// The memory segments, from the current configuration or, if it has
+    /// none, the legacy one (07B0h lists them only there).
+    pub fn memory_segments(&self) -> Vec<MaskMemorySegment> {
+        let legacy = self.hawk.iter().filter(|h| h.legacy_version.is_some());
+        self.current()
+            .chain(legacy)
+            .find_map(|h| h.memory_segments.as_ref())
+            .into_iter()
+            .flat_map(|m| m.items.iter())
+            .filter_map(|m| {
+                let l = m.location.as_ref()?;
+                Some(MaskMemorySegment {
+                    memory_type: m.memory_type.clone(),
+                    address_space: l.address_space.clone(),
+                    start: l.start_address.trim().parse().ok()?,
+                    length: m.length.trim().parse().ok()?,
+                    optional: m.optional == "true",
+                })
+            })
+            .collect()
+    }
+
+    /// The interface objects of the current configuration.
+    pub fn interface_objects(&self) -> Vec<MaskInterfaceObject> {
+        self.current()
+            .filter_map(|h| h.interface_objects.as_ref())
+            .flat_map(|o| o.items.iter())
+            .filter_map(|o| {
+                Some(MaskInterfaceObject {
+                    index: o.index.trim().parse().ok()?,
+                    object_type: o.object_type.trim().parse().ok()?,
+                    properties: o
+                        .properties
+                        .iter()
+                        .filter_map(|p| Some((p.id.trim().parse().ok()?, p.pdt.clone())))
+                        .collect(),
+                })
+            })
+            .collect()
+    }
+
+    fn current(&self) -> impl Iterator<Item = &HawkConfigurationData> {
+        self.hawk.iter().filter(|h| h.legacy_version.is_none())
     }
 
     /// All procedures of the mask: the current configuration first, then the

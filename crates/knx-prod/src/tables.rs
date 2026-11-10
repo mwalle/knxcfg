@@ -765,18 +765,21 @@ pub fn overlay_group_object_table(
     Ok(out)
 }
 
-/// Build a System B GoT (RT 7): one 2-octet descriptor per ASAP 1..max.
+/// Build a System B GoT (RT 7): one 2-octet descriptor per ASAP 1..count,
+/// where `count` is the application's highest object number (ETS 5.7: 60
+/// descriptors for the AKU-02UP.03 with six active objects, knx-sim step 5).
 /// Numbers without an active object get an all-zero descriptor
 /// (communication disabled). Unlinked objects get communication disabled,
 /// as for System 7 (not verified against ETS for System B).
 pub fn build_group_object_table_b(
     active: &[(u16, GroupObject)],
     linked: &HashSet<u16>,
+    count: u16,
 ) -> Result<Vec<u8>> {
     if active.iter().any(|(a, _)| *a == 0) {
         bail!("System B group object numbers start at 1, found object 0");
     }
-    let max = active.iter().map(|(a, _)| *a).max().unwrap_or(0);
+    let max = active.iter().map(|(a, _)| *a).max().unwrap_or(0).max(count);
     let by_asap: HashMap<u16, &GroupObject> = active.iter().map(|(a, o)| (*a, o)).collect();
     let mut out = Vec::with_capacity(2 + max as usize * 2);
     out.extend_from_slice(&max.to_be_bytes());
@@ -907,10 +910,13 @@ mod tests {
         assert_eq!(read_links(TableFormat::SystemB, &a, &b).unwrap().len(), 2);
 
         let linked: HashSet<u16> = [1].into_iter().collect();
-        let got = build_group_object_table_b(&[(1, obj(true)), (3, obj(true))], &linked).unwrap();
+        let got = build_group_object_table_b(&[(1, obj(true)), (3, obj(true))], &linked, 0).unwrap();
         // length 3; ASAP 1 linked: T+C+low prio; ASAP 2 unused; ASAP 3 unlinked.
         assert_eq!(got, [0x00, 0x03, 0x47, 0x00, 0x00, 0x00, 0x43, 0x00]);
-        assert!(build_group_object_table_b(&[(0, obj(true))], &linked).is_err());
+        // The application has objects up to 4: one more, unused descriptor.
+        let got = build_group_object_table_b(&[(1, obj(true)), (3, obj(true))], &linked, 4).unwrap();
+        assert_eq!(got, [0x00, 0x04, 0x47, 0x00, 0x00, 0x00, 0x43, 0x00, 0x00, 0x00]);
+        assert!(build_group_object_table_b(&[(0, obj(true))], &linked, 0).is_err());
     }
 
     #[test]
