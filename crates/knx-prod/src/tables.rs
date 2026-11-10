@@ -201,6 +201,58 @@ impl GroupObjectFlags {
     }
 }
 
+/// Flags and priority a project sets for one group object (ETS: the object's
+/// properties in the project); `None` keeps the product's value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ObjectOverride {
+    pub asap: u16,
+    pub communicate: Option<bool>,
+    pub read: Option<bool>,
+    pub write: Option<bool>,
+    pub transmit: Option<bool>,
+    pub update: Option<bool>,
+    pub read_on_init: Option<bool>,
+    /// Transmission priority bits, as [`priority_bits`] returns them.
+    pub priority: Option<u8>,
+}
+
+impl ObjectOverride {
+    pub fn apply(&self, obj: &mut GroupObject) {
+        let f = &mut obj.flags;
+        for (dst, src) in [
+            (&mut f.communicate, self.communicate),
+            (&mut f.read, self.read),
+            (&mut f.write, self.write),
+            (&mut f.transmit, self.transmit),
+            (&mut f.update, self.update),
+            (&mut f.read_on_init, self.read_on_init),
+        ] {
+            if let Some(v) = src {
+                *dst = v;
+            }
+        }
+        if self.priority.is_some() {
+            obj.priority = self.priority;
+        }
+    }
+}
+
+/// Apply project overrides to the active objects; an override of an object
+/// that is not active is reported.
+pub fn apply_overrides(active: &mut [(u16, GroupObject)], overrides: &[ObjectOverride]) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for o in overrides {
+        match active.iter_mut().find(|(a, _)| *a == o.asap) {
+            Some((_, obj)) => o.apply(obj),
+            None => warnings.push(format!(
+                "settings of group object {} ignored: the object is not active with the current parameters",
+                o.asap
+            )),
+        }
+    }
+    warnings
+}
+
 /// A resolved group object (base `ComObject` with its active `ComObjectRef`
 /// overrides applied).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -770,7 +822,7 @@ pub fn overlay_group_object_table(
 /// descriptors for the AKU-02UP.03 with six active objects, knx-sim step 5).
 /// Numbers without an active object get an all-zero descriptor
 /// (communication disabled). Unlinked objects get communication disabled,
-/// as for System 7 (not verified against ETS for System B).
+/// as for System 7 (ETS 5.7 does the same, knx-sim).
 pub fn build_group_object_table_b(
     active: &[(u16, GroupObject)],
     linked: &HashSet<u16>,

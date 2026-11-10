@@ -3,7 +3,7 @@
 use anyhow::{bail, Context, Result};
 use clap::{Parser, Subcommand};
 use knx_core::{
-    Area, DeviceInstance, DeviceRef, GroupAddress, GroupAddressEntry, GroupObjectLink,
+    Area, DeviceInstance, DeviceRef, GroupAddress, GroupAddressEntry, GroupObjectLink, ObjectSettings, Priority,
     IndividualAddress, Line, ParameterValue,
 };
 use std::path::{Path, PathBuf};
@@ -120,6 +120,19 @@ enum Cmd {
         ia: String,
         object: u16,
         ga: String,
+    },
+    /// Set a group object's flag or priority (ETS: the object's properties)
+    ObjectSet {
+        ia: String,
+        /// Group object number
+        object: u16,
+        /// communication, read, write, transmit, update, read-on-init or priority
+        setting: String,
+        /// on/off for flags, low/high/alert for the priority, or `default`
+        /// for the product's value
+        value: String,
+        #[arg(long)]
+        knxprod: Option<PathBuf>,
     },
     /// Set a device parameter value (validated against the knxprod)
     DeviceSet {
@@ -309,6 +322,10 @@ fn main() -> Result<()> {
         Cmd::Unlink { ia, object, ga } => {
             let dir = resolve_project(project.as_deref())?;
             cmd_unlink(&dir, &ia, object, &ga)
+        }
+        Cmd::ObjectSet { ia, object, setting, value, knxprod } => {
+            let dir = resolve_project(project.as_deref())?;
+            cmd_object_set(&dir, &ia, object, &setting, &value, knxprod.as_deref())
         }
         Cmd::DeviceSet { ia, param, value, knxprod } => {
             let dir = resolve_project(project.as_deref())?;
@@ -902,7 +919,7 @@ fn cmd_download(
         let filter = project.coupler_filter(ia).iter().map(|ga| ga.to_u16()).collect();
         knx_prod::build_coupler_image(&ev, &filter)?
     } else {
-        knx_prod::device_image::build_device_image_eval(&ev, format, &links)?
+        knx_prod::device_image::build_device_image_with(&ev, format, &links, &device.overrides())?
     };
 
     println!("Download image for {ia} ({})", device.device_ref.name);
@@ -1081,6 +1098,7 @@ fn cmd_add(
             ia,
             parameters: vec![],
             links: vec![],
+            objects: vec![],
         });
     }
 
@@ -1264,6 +1282,93 @@ fn cmd_unlink(dir: &Path, ia_str: &str, object: u16, ga_str: &str) -> Result<()>
     Ok(())
 }
 
+fn cmd_object_set(
+    dir: &Path,
+    ia_str: &str,
+    object: u16,
+    setting: &str,
+    value: &str,
+    knxprod_override: Option<&Path>,
+) -> Result<()> {
+    let ia: IndividualAddress = ia_str.parse().with_context(|| format!("invalid IA {ia_str}"))?;
+    let mut project = knx_store::load(dir)?;
+    let device = open_device(dir, &project, ia, knxprod_override)?;
+    let active = knx_prod::tables::active_group_objects(&device.ap, &device.values());
+    let product = match active.into_iter().find(|(n, _)| *n == object) {
+        Some((_, obj)) => obj,
+        None => {
+            let all = knx_prod::tables::group_objects(&device.ap);
+            let Some((_, obj)) = all.iter().find(|(n, _)| *n == object) else {
+                bail!(
+                    "{} has no group object #{object} (objects: {})",
+                    device.ap.name,
+                    number_ranges(all.iter().map(|(n, _)| *n))
+                );
+            };
+            eprintln!("warning: group object #{object} is not active with the current parameters");
+            obj.clone()
+        }
+    };
+
+    let dev = project
+        .devices
+        .iter_mut()
+        .find(|d| d.ia == ia)
+        .ok_or_else(|| anyhow::anyhow!("device {ia} not found"))?;
+    let mut settings = dev
+        .objects
+        .iter()
+        .find(|o| o.object_number == object)
+        .copied()
+        .unwrap_or(ObjectSettings { object_number: object, ..Default::default() });
+    let flag = |v: &str, product: bool| -> Result<Option<bool>> {
+        let on = match v {
+            "default" => return Ok(None),
+            "on" | "1" | "true" | "enabled" => true,
+            "off" | "0" | "false" | "disabled" => false,
+            _ => bail!("a flag is on, off or default, not {v:?}"),
+        };
+        Ok((on != product).then_some(on))
+    };
+    let f = product.flags;
+    match setting {
+        "communication" => settings.communication = flag(value, f.communicate)?,
+        "read" => settings.read = flag(value, f.read)?,
+        "write" => settings.write = flag(value, f.write)?,
+        "transmit" => settings.transmit = flag(value, f.transmit)?,
+        "update" => settings.update = flag(value, f.update)?,
+        "read-on-init" => settings.read_on_init = flag(value, f.read_on_init)?,
+        "priority" => {
+            settings.priority = match value {
+                "default" => None,
+                v => {
+                    let p: Priority = v.parse().map_err(|e: String| anyhow::anyhow!(e))?;
+                    // A product without a priority sends with Low (ETS).
+                    let product = product.priority.or(knx_prod::tables::priority_bits("Low"));
+                    let bits = knx_prod::tables::priority_bits(p.ets_name());
+                    (bits != product).then_some(p)
+                }
+            }
+        }
+        _ => bail!(
+            "unknown setting {setting:?}: communication, read, write, transmit, update, \
+             read-on-init or priority"
+        ),
+    }
+    dev.objects.retain(|o| o.object_number != object);
+    let stored = !settings.is_empty();
+    if stored {
+        dev.objects.push(settings);
+    }
+    project.sort();
+    knx_store::save(dir, &project)?;
+    println!(
+        "Set {ia} object #{object} {setting} = {value}{}",
+        if stored { "" } else { " (the product's settings)" }
+    );
+    Ok(())
+}
+
 fn cmd_device_set(
     dir: &Path,
     ia_str: &str,
@@ -1386,6 +1491,10 @@ impl OpenDevice {
             .collect()
     }
 
+    fn overrides(&self) -> Vec<knx_prod::tables::ObjectOverride> {
+        knx_proj::object_overrides(&self.instance.objects)
+    }
+
     fn links(&self) -> Vec<knx_prod::tables::Link> {
         self.instance
             .links
@@ -1465,7 +1574,7 @@ fn open_device(
         .iter()
         .find(|d| d.ia == ia)
         .cloned()
-        .unwrap_or(DeviceInstance { ia, parameters: vec![], links: vec![] });
+        .unwrap_or(DeviceInstance { ia, parameters: vec![], links: vec![], objects: vec![] });
     let path = product_store::resolve(
         &device_ref.hardware,
         Some(dir),

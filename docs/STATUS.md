@@ -1,7 +1,7 @@
 # Status — next-start prompt
 
 `knxcfg` — a git-friendly KNX configuration tool to replace ETS.
-Repo: `/home/mwalle/repos/knx/knx-config`. Rust. Build with **`cargo build --offline`**
+Repo: `/home/mw/repo/knx/knxcfg`. Rust. Build with **`cargo build --offline`**
 (Debian crates only; see `.cargo/config.toml`).
 
 ## Goal
@@ -120,6 +120,7 @@ knxcfg group-add <ga> [--name N] [--dpt D]     group-rm <ga> [--force]
 knxcfg add <h2p> <ia> [--name N] [--knxprod F] rm <ia>
 knxcfg link <ia> <object> <ga> [--send]        unlink <ia> <object> <ga>
 knxcfg device-set <ia> <param> <value>         # validated; P-3 or MD-2_M-2/MD-2_P-26
+knxcfg object-set <ia> <object> <setting> <value>  # flag on/off/default, priority low/high/alert/default
 knxcfg edit <ia> [--knxprod <file>]            # TUI: Tab=pages, Enter=edit, s=save, q=quit
 knxcfg probe <h2p> | form <h2p> | memory <h2p> | tables <h2p>   [--knxprod <file>]
 knxcfg import <file.knxproj> [--force]         # into this project; unpacks missing product data to vendor/
@@ -182,7 +183,7 @@ couplers with 3.5 KiB tables (0900h–0911h) and Coupler Model 2.0 (2920h).
 (`download --send -i <address>`, `download::execute`: device descriptor
 check, `CompareProp`, load states checked per event, every memory write read
 back, `LdCtrlWriteRelMem` through `PID_TABLE_REFERENCE`, objects named by
-type; not yet coupler filter tables), tested against knx-sim. USB: HID framing, `hidraw`, the EMI
+type, coupler filter tables), tested against knx-sim. USB: HID framing, `hidraw`, the EMI
 handshake, the TL connection and DD0/memory reads are implemented and
 tested against scripted mocks. Hardware runs (knx-usb interface, own
 firmware in `knx-core/standalone/knx-usb`, 2026-11-04): Device Feature
@@ -201,8 +202,11 @@ all 255 objects ETS shows to be active are active. On ETS 5.7 that check is
 one-way, see `docs/knxproj-format.md`. A project holds parameter values and
 visibility, not memory bytes, so comparing images still needs a capture of the
 ETS download of the same project.
-Still to do for M2: per-object flag/priority overrides (reported at import,
-not yet applied to the tables), and keeping the data listed under "Not imported" in
+Per-object flags and priorities set in the project are imported (`objects` in
+`devices/<ia>.yaml`, only what differs from the product), can be set with
+`knxcfg object-set`, and are applied to the group object table; checked against
+ETS in knx-sim for System 7 and System B.
+Still to do for M2: keeping the data listed under "Not imported" in
 `docs/knxproj-format.md`, which M3 needs (D7 Buildings/Functions).
 **knx-sim** (`docs/sim-plan.md`): all six steps done. knxcfg's live downloads
 over KNXnet/IP give the same device state as ETS's for the BE-02001.02
@@ -219,8 +223,7 @@ finish **M4** · **M3** `.knxproj` export · **M6** hardening.
   parameters other than the device hardware checks, calculations outside
   the JS subset (KLIC's Steinhart-Hart tables), couplers other than masks
   0912h/091Ah.
-- Unverified against ETS: System B tables with links, the communication flag
-  of unlinked System B objects, rounding of calculation
+- Unverified against ETS: System B tables with links, rounding of calculation
   results into integer parameters.
 - The memory encoder rejects `TypeText` parameters ("parameter type has no size")
   and an IP address default of `0`, so MDT application `A-0133-10-9E94` (mask 07B0)

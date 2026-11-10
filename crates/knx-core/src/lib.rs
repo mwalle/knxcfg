@@ -272,6 +272,8 @@ impl Project {
             dev.parameters.sort_by(|a, b| a.id.cmp(&b.id));
             dev.links
                 .sort_by(|a, b| (a.object_number, a.ga).cmp(&(b.object_number, b.ga)));
+            dev.objects.retain(|o| !o.is_empty());
+            dev.objects.sort_by_key(|o| o.object_number);
         }
     }
 }
@@ -338,6 +340,10 @@ pub struct DeviceInstance {
     pub parameters: Vec<ParameterValue>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub links: Vec<GroupObjectLink>,
+    /// Flags and priority set per group object, where they differ from the
+    /// product.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub objects: Vec<ObjectSettings>,
 }
 
 /// A single parameter, stored by symbolic id + value.
@@ -360,6 +366,66 @@ pub struct GroupObjectLink {
     /// no link of an object is marked, it transmits on its lowest address.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub send: bool,
+}
+
+/// The settings of one group object that override the product's. A field
+/// that is `None` keeps the product's value.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ObjectSettings {
+    pub object_number: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub communication: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transmit: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_on_init: Option<bool>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<Priority>,
+}
+
+impl ObjectSettings {
+    /// Whether nothing is overridden.
+    pub fn is_empty(&self) -> bool {
+        *self == ObjectSettings { object_number: self.object_number, ..Default::default() }
+    }
+}
+
+/// Transmission priority of a group object, as ETS names it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Priority {
+    Low,
+    High,
+    Alert,
+}
+
+impl Priority {
+    /// The name in knxprod and `.knxproj` files.
+    pub fn ets_name(self) -> &'static str {
+        match self {
+            Priority::Low => "Low",
+            Priority::High => "High",
+            Priority::Alert => "Alert",
+        }
+    }
+}
+
+impl std::str::FromStr for Priority {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, String> {
+        match s.to_ascii_lowercase().as_str() {
+            "low" => Ok(Priority::Low),
+            "high" => Ok(Priority::High),
+            "alert" => Ok(Priority::Alert),
+            _ => Err(format!("priority is low, high or alert, not {s:?}")),
+        }
+    }
 }
 
 #[cfg(test)]
@@ -401,6 +467,7 @@ mod tests {
             ia: ia.parse().unwrap(),
             parameters: Vec::new(),
             links: gas.iter().map(|g| GroupObjectLink { object_number: 0, ga: ga(g), send: false }).collect(),
+            objects: Vec::new(),
         };
         let mut p = Project::default();
         p.devices = vec![

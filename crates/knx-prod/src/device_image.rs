@@ -24,7 +24,7 @@ use anyhow::{anyhow, bail, Context, Result};
 
 use crate::eval::Evaluation;
 use crate::memory::{build_parameter_image_eval, decode_parameter_image, SegmentImage};
-use crate::tables::{self, GroupObject, Link, TableFormat, TableLimits};
+use crate::tables::{self, GroupObject, Link, ObjectOverride, TableFormat, TableLimits};
 use crate::{ApplicationProgram, LoadStep, MasterData};
 
 /// A complete device image, ready for the download sequence.
@@ -92,6 +92,17 @@ pub fn build_device_image_eval(
     format: TableFormat,
     links: &[Link],
 ) -> Result<DeviceImage> {
+    build_device_image_with(ev, format, links, &[])
+}
+
+/// [`build_device_image_eval`] with the project's per-object flags and
+/// priorities.
+pub fn build_device_image_with(
+    ev: &Evaluation,
+    format: TableFormat,
+    links: &[Link],
+    overrides: &[ObjectOverride],
+) -> Result<DeviceImage> {
     let ap = ev.ap;
     if format == TableFormat::Coupler {
         bail!("{} is a coupler; its image is built by build_coupler_image", ap.id);
@@ -120,8 +131,9 @@ pub fn build_device_image_eval(
         warnings.push(format!("parameter {k} does not exist in {}; ignored", ap.id));
     }
 
-    let (active, conflicts) = tables::active_group_objects_eval(ev);
+    let (mut active, conflicts) = tables::active_group_objects_eval(ev);
     warnings.extend(conflicts);
+    warnings.extend(tables::apply_overrides(&mut active, overrides));
     let active_set: HashSet<u16> = active.iter().map(|(a, _)| *a).collect();
     let mut active_links = Vec::new();
     for l in links {

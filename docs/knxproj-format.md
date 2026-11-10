@@ -44,6 +44,12 @@ GroupAddresses/GroupRanges/GroupRange/GroupRange/GroupAddress[@Id @Address @Name
   through several refs (`O-15_R-10125` inactive, `O-15_R-10127` active).
 - `@IsActive` is ETS's visibility result, so it is the oracle for the evaluator.
 - `@Priority` is written even if the product states none (then `Low`).
+- ETS 5.7 writes the flags (`@ReadFlag`, `@WriteFlag`, `@CommunicationFlag`,
+  `@TransmitFlag`, `@UpdateFlag`, `@ReadOnInitFlag`, values `Enabled`/`Disabled`)
+  and `@Priority` (`Low`/`High`/`Alert`) only where the user changed them in
+  the object's properties (knx-sim9 export). The import keeps the values that
+  differ from the product as `objects` in `devices/<ia>.yaml`, and the download
+  applies them; the device state equals ETS's (knx-sim, System 7 and System B).
 - ETS keeps values and refs of objects and parameters that are currently hidden.
 - A device can have no parameter and object refs at all (`in16-tests` 1.1.1).
 
@@ -98,9 +104,6 @@ a wrong assumption loses data visibly rather than writing it to the wrong place.
 
 Reported by `knxcfg import`; the model has no place for these yet.
 
-- Set per object in ETS and **changes the download**: `ReadFlag`, `WriteFlag`,
-  `CommunicationFlag`, `TransmitFlag`, `UpdateFlag`, `ReadOnInitFlag`, `Priority`.
-  A value that differs from the product gets a warning for that object.
 - Needed for a faithful export (M3): `Buildings`/`Locations` and functions (D7), group range
   names, group address style, descriptions, serial numbers, object `Text`,
   `FunctionText` and `DatapointType`, and the values of inactive refs of a

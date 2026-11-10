@@ -98,5 +98,5 @@ evaluated, see `crates/knx-prod/src/eval.rs`).
 - `device_image::build_device_image` — passes final flags bytes keyed by ASAP,
   computing comm-clear from the project links.
 
-Remaining (already tracked in M2): project-level flag/priority overrides and
-the exact visible set need `.knxproj` import.
+Project-level flag/priority overrides are imported and applied (M2); ETS's
+visible set is compared at import.

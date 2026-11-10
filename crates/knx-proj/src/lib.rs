@@ -28,10 +28,10 @@ use std::path::{Path, PathBuf};
 use anyhow::{anyhow, bail, Context, Result};
 use knx_core::{
     Area, DeviceInstance, DeviceRef, GroupAddress, GroupAddressEntry, GroupObjectLink,
-    IndividualAddress, Line, ParameterValue, Project,
+    IndividualAddress, Line, ObjectSettings, ParameterValue, Priority, Project,
 };
 use knx_prod::eval::{full_key, short_key};
-use knx_prod::tables::{self, GroupObject, Link, TableFormat};
+use knx_prod::tables::{self, GroupObject, Link, ObjectOverride, TableFormat};
 use knx_prod::{ApplicationProgram, Evaluation};
 use serde::Deserialize;
 
@@ -734,6 +734,7 @@ fn convert_device(
         .collect();
 
     let mut links: Vec<GroupObjectLink> = Vec::new();
+    let mut objects: Vec<ObjectSettings> = Vec::new();
     let mut compared_objects = 0;
     let mut visibility_mismatches = Vec::new();
     let mut compared: HashSet<(usize, String)> = HashSet::new();
@@ -777,7 +778,10 @@ fn convert_device(
             }
         }
         if object.is_active != Some(false) {
-            warn_overrides(object, asap, &resolved, &mut warnings);
+            let settings = object_settings(object, asap, &resolved);
+            if !settings.is_empty() {
+                objects.push(settings);
+            }
         } else if !connected.is_empty() {
             warnings.push(format!(
                 "group object #{asap} ({}) is inactive in ETS, its links were not imported",
@@ -836,7 +840,9 @@ fn convert_device(
         .table_format
         .clone()
         .map_err(|e| anyhow!(e))
-        .and_then(|format| knx_prod::device_image::build_device_image_eval(&ev, format, &table_links));
+        .and_then(|format| {
+            knx_prod::device_image::build_device_image_with(&ev, format, &table_links, &object_overrides(&objects))
+        });
     let image_error = match image {
         _ if coupler => None, // built in `convert`, once all links are known
         Ok(image) => {
@@ -857,6 +863,7 @@ fn convert_device(
                 .map(|(id, value)| ParameterValue { id, value: serde_yaml::Value::String(value) })
                 .collect(),
             links,
+            objects,
         },
         warnings,
         compared_objects,
@@ -938,42 +945,50 @@ fn add_link(
     }
 }
 
-/// The model has no per-object overrides yet, so a project setting that
-/// changes the group object table has to be reported.
-fn warn_overrides(
-    object: &ComObjectInstanceRef,
-    asap: u16,
-    resolved: &GroupObject,
-    warnings: &mut Vec<String>,
-) {
-    let flags = [
-        ("ReadFlag", &object.read_flag, resolved.flags.read),
-        ("WriteFlag", &object.write_flag, resolved.flags.write),
-        ("CommunicationFlag", &object.communication_flag, resolved.flags.communicate),
-        ("TransmitFlag", &object.transmit_flag, resolved.flags.transmit),
-        ("UpdateFlag", &object.update_flag, resolved.flags.update),
-        ("ReadOnInitFlag", &object.read_on_init_flag, resolved.flags.read_on_init),
-    ];
-    let mut differing: Vec<String> = flags
+/// The flags and priority the project sets for an object where they differ
+/// from the product's.
+fn object_settings(object: &ComObjectInstanceRef, asap: u16, resolved: &GroupObject) -> ObjectSettings {
+    let f = resolved.flags;
+    let differs = |set: &str, product: bool| match set {
+        "Enabled" if !product => Some(true),
+        "Disabled" if product => Some(false),
+        _ => None,
+    };
+    // A product that states no priority means Low: ETS records `Low` for
+    // those objects.
+    let product_priority = resolved.priority.or(tables::priority_bits("Low"));
+    let priority = match object.priority.as_str() {
+        "" => None,
+        p if tables::priority_bits(p) == product_priority => None,
+        p => p.parse::<Priority>().ok(),
+    };
+    ObjectSettings {
+        object_number: asap,
+        communication: differs(&object.communication_flag, f.communicate),
+        read: differs(&object.read_flag, f.read),
+        write: differs(&object.write_flag, f.write),
+        transmit: differs(&object.transmit_flag, f.transmit),
+        update: differs(&object.update_flag, f.update),
+        read_on_init: differs(&object.read_on_init_flag, f.read_on_init),
+        priority,
+    }
+}
+
+/// The table builder's form of a device's object settings.
+pub fn object_overrides(objects: &[ObjectSettings]) -> Vec<ObjectOverride> {
+    objects
         .iter()
-        .filter(|(_, set, product)| !set.is_empty() && (set.as_str() == "Enabled") != *product)
-        .map(|(name, set, _)| format!("{name}={set}"))
-        .collect();
-    if !object.priority.is_empty() {
-        // A product that states no priority means Low: ETS records `Low` for
-        // those objects.
-        let product = resolved.priority.or(tables::priority_bits("Low"));
-        if tables::priority_bits(&object.priority) != product {
-            differing.push(format!("Priority={}", object.priority));
-        }
-    }
-    if !differing.is_empty() {
-        warnings.push(format!(
-            "group object #{asap}: the project sets {}, which is not imported; \
-             the download uses the product's settings",
-            differing.join(", ")
-        ));
-    }
+        .map(|o| ObjectOverride {
+            asap: o.object_number,
+            communicate: o.communication,
+            read: o.read,
+            write: o.write,
+            transmit: o.transmit,
+            update: o.update,
+            read_on_init: o.read_on_init,
+            priority: o.priority.and_then(|p| tables::priority_bits(p.ets_name())),
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -1169,5 +1184,44 @@ mod tests {
         assert!(links[0].send);
         assert!(!links[1].send);
         assert_eq!(warnings.len(), 1);
+    }
+
+    #[test]
+    fn object_settings_keep_what_differs_from_the_product() {
+        let mut doc: InstallationDoc = parse(INSTALLATION.as_bytes()).unwrap();
+        let line = &mut doc.project.installations.items[0].topology.as_mut().unwrap().areas[0].lines[0];
+        let mut object = line.devices[0].objects.as_mut().unwrap().items.remove(0);
+        let product = GroupObject {
+            flags: tables::GroupObjectFlags { communicate: true, write: true, ..Default::default() },
+            value_field_type: 0,
+            priority: None,
+            text: String::new(),
+            function_text: String::new(),
+            datapoint_type: String::new(),
+            object_size: String::new(),
+        };
+        // `Priority="Low"` equals a product without a priority.
+        assert!(object_settings(&object, 4, &product).is_empty());
+
+        object.write_flag = "Enabled".into();
+        object.transmit_flag = "Enabled".into();
+        object.communication_flag = "Disabled".into();
+        object.priority = "Alert".into();
+        let settings = object_settings(&object, 4, &product);
+        assert_eq!(
+            settings,
+            ObjectSettings {
+                object_number: 4,
+                communication: Some(false),
+                transmit: Some(true),
+                priority: Some(Priority::Alert),
+                ..Default::default()
+            }
+        );
+        let o = object_overrides(&[settings])[0];
+        let mut obj = product.clone();
+        o.apply(&mut obj);
+        assert!(!obj.flags.communicate && obj.flags.transmit && obj.flags.write);
+        assert_eq!(obj.priority, Some(0b10));
     }
 }

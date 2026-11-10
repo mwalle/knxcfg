@@ -50,3 +50,27 @@ fn partial_download() {
     let compare = plan.iter().position(|s| *s == DownloadStep::CompareLoadedProp { obj_idx: 4, prop_id: 7 }).unwrap();
     assert!(read < alloc && alloc < compare);
 }
+
+/// Flags and priorities set in the project, as ETS 5.7 writes them into the
+/// group object table (knx-sim, `docs/ets5-findings.md`). No object is
+/// linked, so all have communication cleared.
+#[test]
+fn object_settings_in_the_group_object_table() {
+    use knx_prod::tables::ObjectOverride;
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../refs/knxprod/MDT_KP_AKU_03_Universal_Actuator_V41a.knxprod");
+    if !path.is_file() {
+        return;
+    }
+    let kp = KnxProd::open(path).unwrap();
+    let ap = kp.application_program(H2P).unwrap();
+    let values = HashMap::new();
+    let ev = knx_prod::Evaluation::new(&ap, &values);
+    let overrides = [
+        ObjectOverride { asap: 1, read: Some(true), transmit: Some(true), read_on_init: Some(true), priority: Some(0b10), ..Default::default() },
+        ObjectOverride { asap: 3, write: Some(false), update: Some(true), ..Default::default() },
+    ];
+    let image = knx_prod::device_image::build_device_image_with(&ev, kp.table_format(&ap).unwrap(), &[], &overrides).unwrap();
+    let got = &image.group_object_table.bytes;
+    assert_eq!(&got[..2], [0x00, 0x3C]);
+    assert_eq!(&got[2..18], [0x7A, 0x00, 0x13, 0x00, 0x83, 0x00, 0x13, 0x07, 0x13, 0x07, 0x00, 0x00, 0x00, 0x00, 0x13, 0x00]);
+}

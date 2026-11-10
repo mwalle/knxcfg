@@ -115,7 +115,7 @@ fn write_yaml<T: Serialize>(path: &Path, value: &T) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use knx_core::{Area, DeviceRef, GroupObjectLink, Line, ParameterValue};
+    use knx_core::{Area, DeviceRef, GroupObjectLink, Line, ObjectSettings, ParameterValue};
 
     #[test]
     fn roundtrip_preserves_data_and_order() {
@@ -162,6 +162,7 @@ mod tests {
                 ga: "1/2/3".parse().unwrap(),
                 send: true,
             }],
+            objects: vec![ObjectSettings { object_number: 1, transmit: Some(false), ..Default::default() }],
         });
 
         save(&dir, &project).unwrap();
@@ -183,6 +184,7 @@ mod tests {
             ia: "1.1.3".parse().unwrap(),
             parameters: vec![],
             links: vec![],
+            objects: vec![],
         });
         save(&dir, &project).unwrap();
         assert!(dir.join("devices/1.1.3.yaml").is_file());

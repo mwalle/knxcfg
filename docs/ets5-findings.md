@@ -46,6 +46,16 @@ GroupObject table at $4400: 19 07 00 07 1A 4F 00 07 22 DB 00 07 ... (26 × 4 oct
   0x04 comm, 0x03 priority). The knxprod template carries `0xDF` (all flags
   on, segment selector 0, low priority) in every GO slot; ETS overwrites it
   with the realized flags (`4f`/`db`/`d3`/`4b`).
+- Flags and priority changed per object in the project (knx-sim, 2026-11-10)
+  replace the product's in the config octet: GO0 of the BE-02001.02 with read
+  off, write and update on, priority High gets `D5`; the unlinked GO6 with
+  transmit off and priority Alert gets `0A` (communication cleared as for
+  every unlinked object).
+- System B (AKU-02UP.03, 2-octet descriptors `[config][type]`): the same bit
+  layout, with bit 5 = read on init. ETS also clears the communication bit of
+  unlinked objects there (`13 00` for the unlinked defaults), and the project's
+  settings give `7A` (transmit, read on init, write, read, Alert) and `83`
+  (update, Low).
 
 ## Memory map
 
