@@ -118,6 +118,8 @@ knxcfg interfaces                              # hidraw devices, KNX USB interfa
 knxcfg device-info <ia> [-i /dev/hidrawN]      # mask version (DD0) over the bus
 knxcfg mem-read <ia> <addr> <count> [-i ...]   # hex dump; addr 0x4000 / 4000h / decimal
 knxcfg prog-ia <ia> [--serial SN] [--wait S] [-i ...]  # assign IA: programming mode, or by serial (0083:12345678)
+knxcfg go-read <ia> <object> [-i ...]          # GO value/status/config via PID_GO_DIAGNOSTICS (optional in devices)
+knxcfg go-mem-read <ia> <object> [-i ...]      # System 7: GO value + RAM flags at the knxprod's data pointer
 ```
 Bus commands use `--interface` or the only KNX `hidraw` device. `/dev/hidraw*`
 is root-only by default; a udev rule (`SUBSYSTEM=="hidraw",

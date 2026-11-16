@@ -198,6 +198,31 @@ enum Cmd {
         #[arg(short, long)]
         interface: Option<PathBuf>,
     },
+    /// Read a group object's value and config over the bus with Group Object
+    /// Diagnostics (PID_GO_DIAGNOSTICS); no group address needed
+    GoRead {
+        /// Individual address, e.g. 1.1.1
+        ia: String,
+        /// Group object number as the device counts it (System B from 1)
+        object: u16,
+        /// USB interface (defaults to the only KNX one)
+        #[arg(short, long)]
+        interface: Option<PathBuf>,
+    },
+    /// Read a group object's value from device RAM (System 7 only), at the
+    /// address the device's knxprod gives for it
+    GoMemRead {
+        /// Individual address of a device in the project, e.g. 1.1.1
+        ia: String,
+        /// Group object number (ASAP, from 0)
+        object: u16,
+        /// knxprod file (defaults to the one recorded at `add` time)
+        #[arg(long)]
+        knxprod: Option<PathBuf>,
+        /// USB interface (defaults to the only KNX one)
+        #[arg(short, long)]
+        interface: Option<PathBuf>,
+    },
 }
 
 fn main() -> Result<()> {
@@ -306,6 +331,14 @@ fn main() -> Result<()> {
         Cmd::MemRead { ia, address, count, interface } => {
             bus::cmd_mem_read(interface.as_deref(), &ia, &address, count)
         }
+        Cmd::GoRead { ia, object, interface } => bus::cmd_go_read(interface.as_deref(), &ia, object),
+        Cmd::GoMemRead { ia, object, knxprod, interface } => cmd_go_mem_read(
+            &resolve_project(project.as_deref())?,
+            &ia,
+            object,
+            knxprod.as_deref(),
+            interface.as_deref(),
+        ),
     }
 }
 
@@ -1344,6 +1377,53 @@ impl OpenDevice {
             })
             .collect()
     }
+}
+
+/// `knxcfg go-mem-read <ia> <object>`: the data pointer, value type and
+/// RAM-flags address come from the device's GoT as knxcfg would download
+/// it (System 7 data pointers are fixed by the knxprod template), nothing is
+/// read from the device but the value and its flags.
+fn cmd_go_mem_read(
+    dir: &Path,
+    ia_str: &str,
+    object: u16,
+    knxprod_override: Option<&Path>,
+    interface: Option<&Path>,
+) -> Result<()> {
+    use knx_prod::tables::TableFormat;
+    let ia: IndividualAddress = ia_str.parse().with_context(|| format!("invalid IA {ia_str}"))?;
+    let project = knx_store::load(dir)?;
+    let device = open_device(dir, &project, ia, knxprod_override)?;
+    let ap = &device.ap;
+    let format = device.knxprod.table_format(ap)?;
+    if format != TableFormat::System7 {
+        bail!(
+            "{ia} uses mask {} ({format:?}): only System 7 devices keep group object values at \
+             addresses the knxprod gives; use `knxcfg go-read`",
+            ap.mask_version
+        );
+    }
+    let ev = knx_prod::Evaluation::new(ap, &device.values());
+    let image = knx_prod::device_image::build_device_image_eval(&ev, format, &device.links())?;
+    let entry = knx_prod::tables::got7_entry(&image.group_object_table.bytes, object)?;
+    let (_, obj) = image
+        .active_group_objects
+        .iter()
+        .find(|(a, _)| *a == object)
+        .ok_or_else(|| anyhow::anyhow!("group object {object} is not active with the parameters of {ia}"))?;
+    let label = [obj.text.as_str(), obj.function_text.as_str()]
+        .iter()
+        .filter(|t| !t.is_empty())
+        .copied()
+        .collect::<Vec<_>>()
+        .join(", ");
+    bus::go_mem_read(
+        interface,
+        ia,
+        object,
+        &entry,
+        &bus::ObjectInfo { label, datapoint_type: obj.datapoint_type.clone(), application: ap.id.clone() },
+    )
 }
 
 fn open_device(

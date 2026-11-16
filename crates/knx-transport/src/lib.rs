@@ -15,6 +15,7 @@ use std::time::Duration;
 
 pub mod apdu;
 pub mod cemi;
+pub mod go_diag;
 #[cfg(target_os = "linux")]
 pub mod hidraw;
 pub mod mgmt;

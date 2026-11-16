@@ -175,6 +175,20 @@ impl<'a> Connection<'a> {
         }
     }
 
+    /// Send `apdu` and return the first response APDU with the 10-bit APCI
+    /// `response`; other services are skipped.
+    pub fn request_exact(&mut self, apdu: &[u8], response: u16) -> Result<Vec<u8>> {
+        self.send(apdu)?;
+        let deadline = Instant::now() + CONNECTION_TIMEOUT;
+        loop {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let resp = self.receive(left)?;
+            if apdu::apci_of(&resp) == Some(response) {
+                return Ok(resp);
+            }
+        }
+    }
+
     /// `T_Disconnect`.
     pub fn close(mut self) -> Result<()> {
         if self.open {
@@ -292,6 +306,49 @@ pub fn memory_read(c: &mut Connection, address: u16, len: usize) -> Result<Vec<u
         out.extend_from_slice(&data);
     }
     Ok(out)
+}
+
+/// `PID_OBJECT_TYPE`, in every interface object (`03_05_01 §4.2.1`).
+pub const PID_OBJECT_TYPE: u8 = 1;
+/// Interface objects are numbered from 0 without gaps; this bounds the
+/// search for a missing type.
+const MAX_OBJECT_INDEX: u8 = 63;
+
+/// `A_PropertyValue_Read` of `count` elements from `start`
+/// (`03_05_02 §3.27 DMP_InterfaceObjectRead_R`); `None` for the negative
+/// response.
+pub fn property_value_read(
+    c: &mut Connection,
+    object_index: u8,
+    property_id: u8,
+    count: u8,
+    start: u16,
+) -> Result<Option<Vec<u8>>> {
+    let req = apdu::property_value_read(object_index, property_id, count, start);
+    let resp = c.request_exact(&req, apci::PROPERTY_VALUE_RESPONSE)?;
+    apdu::parse_property_value_response(&resp, object_index, property_id)
+}
+
+/// `A_FunctionPropertyState_Read`: the response from the return code on,
+/// empty when the device does not have the property.
+pub fn function_property_state_read(c: &mut Connection, object_index: u8, property_id: u8, data: &[u8]) -> Result<Vec<u8>> {
+    let req = apdu::function_property_state_read(object_index, property_id, data);
+    let resp = c.request_exact(&req, apci::FUNCTION_PROPERTY_STATE_RESPONSE)?;
+    apdu::parse_function_property_state_response(&resp, object_index, property_id)
+}
+
+/// The object index of the first interface object of `object_type`, from
+/// its `PID_OBJECT_TYPE`; `None` if the device has none. The search ends at
+/// the first index without an object.
+pub fn find_object_index(c: &mut Connection, object_type: u16) -> Result<Option<u8>> {
+    for idx in 0..=MAX_OBJECT_INDEX {
+        match property_value_read(c, idx, PID_OBJECT_TYPE, 1, 1)? {
+            Some(d) if d.len() == 2 && u16::from_be_bytes([d[0], d[1]]) == object_type => return Ok(Some(idx)),
+            Some(_) => {}
+            None => return Ok(None),
+        }
+    }
+    Ok(None)
 }
 
 /// Send an `L_Data.req` and wait for its `L_Data.con`; `false` if it is
@@ -519,6 +576,11 @@ mod tests {
         /// `T_Connect` with `T_Disconnect`).
         tl: bool,
         mem: Vec<u8>,
+        /// Interface object types by object index.
+        objects: Vec<u16>,
+        /// `A_FunctionPropertyState_Read` (object index, PID) → response
+        /// data from the return code on.
+        fp_state: Vec<((u8, u8), Vec<u8>)>,
         seq_rcv: u8,
         seq_send: u8,
         restarts: usize,
@@ -532,6 +594,8 @@ mod tests {
                 prog: false,
                 tl: true,
                 mem: (0..=255).collect(),
+                objects: vec![0, 1, 2, 3, 4, 9],
+                fp_state: vec![],
                 seq_rcv: 0,
                 seq_send: 0,
                 restarts: 0,
@@ -670,6 +734,22 @@ mod tests {
                 let mut resp = vec![0x02, 0x40 | n as u8, apdu[2], apdu[3]];
                 resp.extend_from_slice(&self.devs[i].mem[at..at + n]);
                 self.respond(i, &resp);
+            } else if apdu::apci_of(&apdu) == Some(apci::PROPERTY_VALUE_READ) {
+                let mut resp = vec![0x03, 0xD6, apdu[2], apdu[3]];
+                match self.devs[i].objects.get(apdu[2] as usize) {
+                    Some(t) if apdu[3] == PID_OBJECT_TYPE => {
+                        resp.extend_from_slice(&[0x10, 0x01]);
+                        resp.extend_from_slice(&t.to_be_bytes());
+                    }
+                    _ => resp.extend_from_slice(&[0x00, 0x01]),
+                }
+                self.respond(i, &resp);
+            } else if apdu::apci_of(&apdu) == Some(apci::FUNCTION_PROPERTY_STATE_READ) {
+                let mut resp = vec![0x02, 0xC9, apdu[2], apdu[3]];
+                if let Some((_, d)) = self.devs[i].fp_state.iter().find(|(k, _)| *k == (apdu[2], apdu[3])) {
+                    resp.extend_from_slice(d);
+                }
+                self.respond(i, &resp);
             } else if apdu::apci_of(&apdu) == Some(apci::RESTART) {
                 self.devs[i].prog = false;
                 self.devs[i].restarts += 1;
@@ -699,6 +779,25 @@ mod tests {
             vec![0x80, 0x40, 0xC2, 0x44, 0xC6, 0x48, 0xCA, 0x81],
             "T_Connect, DD read seq 0, T_ACK 0, mem read seq 1, T_ACK 1, seq 2, T_ACK 2, T_Disconnect"
         );
+    }
+
+    #[test]
+    fn object_index_search() {
+        let mut bus = Bus::new();
+        let mut c = Connection::open(&mut bus, DEV).unwrap();
+        assert_eq!(find_object_index(&mut c, 9).unwrap(), Some(5));
+        assert_eq!(find_object_index(&mut c, 6).unwrap(), None, "ends at the first missing index");
+        c.close().unwrap();
+    }
+
+    #[test]
+    fn function_property_state() {
+        let mut bus = Bus::new();
+        bus.devs[0].fp_state.push(((5, 66), vec![0x21, 0x01, 0x00, 0x03, 0x08, 0x01]));
+        let mut c = Connection::open(&mut bus, DEV).unwrap();
+        assert_eq!(function_property_state_read(&mut c, 5, 66, &[0, 1, 0, 3]).unwrap(), vec![0x21, 0x01, 0x00, 0x03, 0x08, 0x01]);
+        assert!(function_property_state_read(&mut c, 5, 67, &[]).unwrap().is_empty());
+        c.close().unwrap();
     }
 
     #[test]

@@ -685,6 +685,46 @@ pub fn got7_config_offset(base_offset: usize, asap: u16) -> usize {
     base_offset + GOT7_HEADER + asap as usize * GOT7_DESCRIPTOR + 2
 }
 
+/// Where a System 7 group object keeps its value and communication flags,
+/// from its GoT descriptor (`03_05_01 §4.18.9.1`, `§4.18.3.1.1.1`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Got7Entry {
+    /// Address of the value's most significant octet.
+    pub data_pointer: u16,
+    /// Config octet (RT2 layout, `§4.18.4.1`).
+    pub config: u8,
+    /// Type octet: the value field type (`Table 88`, codes 0..=14).
+    pub value_type: u8,
+    /// Address of the RAM-flags octet that holds the object's flags.
+    pub ram_flags: u16,
+    /// The flags are the octet's high nibble (odd object numbers);
+    /// otherwise the low nibble.
+    pub ram_flags_high: bool,
+}
+
+/// The descriptor of object `asap` in a System 7 GoT that starts at its
+/// count octet.
+pub fn got7_entry(table: &[u8], asap: u16) -> Result<Got7Entry> {
+    let Some(&count) = table.first() else {
+        bail!("Group Object Table is empty");
+    };
+    if asap >= count as u16 {
+        bail!("group object {asap} does not exist: the Group Object Table has {count} objects (0..{})", count.saturating_sub(1));
+    }
+    let d = GOT7_HEADER + asap as usize * GOT7_DESCRIPTOR;
+    if table.len() < d + GOT7_DESCRIPTOR {
+        bail!("Group Object Table holds only {} bytes for {count} objects", table.len());
+    }
+    let ram_flags_table = u16::from_be_bytes([table[1], table[2]]);
+    Ok(Got7Entry {
+        data_pointer: u16::from_be_bytes([table[d], table[d + 1]]),
+        config: table[d + 2],
+        value_type: table[d + 3],
+        ram_flags: ram_flags_table.wrapping_add(asap / 2),
+        ram_flags_high: asap % 2 == 1,
+    })
+}
+
 /// Overlay a System 7 GoT template: active objects get their config and
 /// type octets; inactive descriptors keep the template config with the
 /// communication bit cleared. Data pointers and the RAM-flags pointer are
@@ -768,6 +808,21 @@ mod tests {
     /// The examples of `03_05_01`: 7/1879 (3F57h) is bit 7 of octet 07EAh
     /// (§5.3.1.1.1), 0/232 (E8h) bit 0 of octet 1Dh, at 021Dh in the
     /// coupler's memory (§5.2.1.3).
+    #[test]
+    fn got7_entries() {
+        // The oracle GoT: 25 objects, RAM flags at 0700h, GO0 at 071Ah, GO1 at 0722h.
+        let mut t = vec![0x19, 0x07, 0x00, 0x07, 0x1A, 0x4F, 0x00, 0x07, 0x22, 0xDB, 0x07];
+        t.resize(3 + 25 * 4, 0);
+        let e = got7_entry(&t, 0).unwrap();
+        assert_eq!((e.data_pointer, e.config, e.value_type), (0x071A, 0x4F, 0));
+        assert_eq!((e.ram_flags, e.ram_flags_high), (0x0700, false));
+        let e = got7_entry(&t, 1).unwrap();
+        assert_eq!((e.data_pointer, e.value_type, e.ram_flags, e.ram_flags_high), (0x0722, 7, 0x0700, true));
+        assert_eq!(got7_entry(&t, 24).unwrap().ram_flags, 0x070C);
+        assert!(got7_entry(&t, 25).is_err());
+        assert!(got7_entry(&t[..10], 1).is_err(), "truncated");
+    }
+
     #[test]
     fn filter_table_bits_follow_the_spec_examples() {
         let t = build_filter_table([0x3F57, 0x00E8, 0]);

@@ -30,7 +30,10 @@
 //! | `A_IndividualAddressSerialNumber_Read`     | `1111011100` |
 //! | `A_IndividualAddressSerialNumber_Response` | `1111011101` |
 //! | `A_IndividualAddressSerialNumber_Write`    | `1111011110` |
+//! | `A_PropertyValue_Response`  | `1111010110`   |
 //! | `A_FunctionPropertyCommand` | `1011000111`   |
+//! | `A_FunctionPropertyState_Read` | `1011001000` |
+//! | `A_FunctionPropertyState_Response` | `1011001001` |
 //! | `A_FilterTable_Open`        | `1111000000`   |
 //! | `A_FilterTable_Write`       | `1111000011`   |
 //!
@@ -61,8 +64,10 @@ pub mod apci {
     pub const DEVICE_DESCRIPTOR_RESPONSE: u16 = 0x340;
     pub const RESTART: u16 = 0x380;
     pub const PROPERTY_VALUE_READ: u16 = 0x3D5;
+    pub const PROPERTY_VALUE_RESPONSE: u16 = 0x3D6;
     pub const PROPERTY_VALUE_WRITE: u16 = 0x3D7;
     pub const FUNCTION_PROPERTY_COMMAND: u16 = 0x2C7;
+    pub const FUNCTION_PROPERTY_STATE_READ: u16 = 0x2C8;
     pub const FUNCTION_PROPERTY_STATE_RESPONSE: u16 = 0x2C9;
     pub const FILTER_TABLE_OPEN: u16 = 0x3C0;
     pub const FILTER_TABLE_WRITE: u16 = 0x3C3;
@@ -136,6 +141,52 @@ pub fn function_property_command(object_index: u8, property_id: u8, data: &[u8])
     out.push(property_id);
     out.extend_from_slice(data);
     out
+}
+
+/// `A_FunctionPropertyState_Read` (`03_03_07 §3.4.7.2`):
+/// `[APCI:2][object_index][property_id][data]`.
+pub fn function_property_state_read(object_index: u8, property_id: u8, data: &[u8]) -> Vec<u8> {
+    let mut out = apci_octets(apci::FUNCTION_PROPERTY_STATE_READ, 0).to_vec();
+    out.push(object_index);
+    out.push(property_id);
+    out.extend_from_slice(data);
+    out
+}
+
+/// `A_FunctionPropertyState_Response` (`03_03_07 §3.4.7.3`):
+/// `[APCI:2][object_index][property_id][return code][data]` → the octets
+/// from the return code on. Empty when the device does not have the
+/// property (no return code at all).
+pub fn parse_function_property_state_response(apdu: &[u8], object_index: u8, property_id: u8) -> Result<Vec<u8>> {
+    if apci_of(apdu) != Some(apci::FUNCTION_PROPERTY_STATE_RESPONSE) || apdu.len() < 4 {
+        bail!("not an A_FunctionPropertyState_Response: {apdu:02X?}");
+    }
+    if apdu[2] != object_index || apdu[3] != property_id {
+        bail!(
+            "A_FunctionPropertyState_Response for object {} PID {}, expected object {object_index} PID {property_id}",
+            apdu[2],
+            apdu[3]
+        );
+    }
+    Ok(apdu[4..].to_vec())
+}
+
+/// `A_PropertyValue_Response` (`03_03_07 §3.4.4.1`):
+/// `[APCI:2][object_index][property_id][nr_of_elem:4 | start_index:12][data]`
+/// → the data, `None` for the negative response (`nr_of_elem = 0`: no such
+/// object or property, or no access).
+pub fn parse_property_value_response(apdu: &[u8], object_index: u8, property_id: u8) -> Result<Option<Vec<u8>>> {
+    if apci_of(apdu) != Some(apci::PROPERTY_VALUE_RESPONSE) || apdu.len() < 6 {
+        bail!("not an A_PropertyValue_Response: {apdu:02X?}");
+    }
+    if apdu[2] != object_index || apdu[3] != property_id {
+        bail!(
+            "A_PropertyValue_Response for object {} PID {}, expected object {object_index} PID {property_id}",
+            apdu[2],
+            apdu[3]
+        );
+    }
+    Ok((apdu[4] >> 4 != 0).then(|| apdu[6..].to_vec()))
 }
 
 /// `A_FilterTable_Open` (`03_03_07 §3.6.1`): no fields.
@@ -299,6 +350,28 @@ mod tests {
         assert_eq!(parse_memory_response(&[0x02, 0x42, 0x01, 0x00, 0xAB, 0xCD]).unwrap(), (0x0100, vec![0xAB, 0xCD]));
         assert!(parse_memory_response(&[0x02, 0x40, 0x01, 0x00]).is_err(), "negative response");
         assert!(parse_memory_response(&[0x02, 0x43, 0x01, 0x00, 0xAB]).is_err(), "short data");
+    }
+
+    #[test]
+    fn function_property_state_layouts() {
+        // GO Diagnostics, Get local GO value of object 5 on object index 9.
+        assert_eq!(
+            function_property_state_read(9, 66, &[0x00, 0x01, 0x00, 0x05]),
+            vec![0x02, 0xC8, 0x09, 0x42, 0x00, 0x01, 0x00, 0x05]
+        );
+        let resp = [0x02, 0xC9, 0x09, 0x42, 0x21, 0x01, 0x00, 0x05, 0x00, 0x01];
+        assert_eq!(parse_function_property_state_response(&resp, 9, 66).unwrap(), resp[4..].to_vec());
+        assert!(parse_function_property_state_response(&resp, 9, 67).is_err(), "other property");
+        assert!(parse_function_property_state_response(&resp[..4], 9, 66).unwrap().is_empty());
+    }
+
+    #[test]
+    fn property_value_response_parsing() {
+        let ok = [0x03, 0xD6, 0x02, 0x01, 0x10, 0x01, 0x00, 0x09];
+        assert_eq!(parse_property_value_response(&ok, 2, 1).unwrap(), Some(vec![0x00, 0x09]));
+        let neg = [0x03, 0xD6, 0x02, 0x01, 0x00, 0x01];
+        assert_eq!(parse_property_value_response(&neg, 2, 1).unwrap(), None);
+        assert!(parse_property_value_response(&ok, 3, 1).is_err());
     }
 
     #[test]
