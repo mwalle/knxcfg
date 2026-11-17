@@ -263,6 +263,10 @@ enum Cmd {
         /// knxprod file (defaults to the one recorded at `add` time)
         #[arg(long)]
         knxprod: Option<PathBuf>,
+        /// Read the object even if it is not active with the device's
+        /// parameters (e.g. objects only shown in a mode ETS never offers)
+        #[arg(long)]
+        force: bool,
         /// USB interface (defaults to the only KNX one)
         #[arg(short, long)]
         interface: Option<PathBuf>,
@@ -390,11 +394,12 @@ fn main() -> Result<()> {
             bus::cmd_mem_read(interface.as_deref(), &ia, &address, count)
         }
         Cmd::GoRead { ia, object, interface } => bus::cmd_go_read(interface.as_deref(), &ia, object),
-        Cmd::GoMemRead { ia, object, knxprod, interface } => cmd_go_mem_read(
+        Cmd::GoMemRead { ia, object, knxprod, force, interface } => cmd_go_mem_read(
             &resolve_project(project.as_deref())?,
             &ia,
             object,
             knxprod.as_deref(),
+            force,
             interface.as_deref(),
         ),
     }
@@ -1745,6 +1750,7 @@ fn cmd_go_mem_read(
     ia_str: &str,
     object: u16,
     knxprod_override: Option<&Path>,
+    force: bool,
     interface: Option<&Path>,
 ) -> Result<()> {
     use knx_prod::tables::TableFormat;
@@ -1763,12 +1769,31 @@ fn cmd_go_mem_read(
     let ev = knx_prod::Evaluation::new(ap, &device.values());
     let image = knx_prod::device_image::build_device_image_eval(&ev, format, &device.links())?;
     let entry = knx_prod::tables::got7_entry(&image.group_object_table.bytes, object)?;
-    let (_, obj) = image
-        .active_group_objects
-        .iter()
-        .find(|(a, _)| *a == object)
-        .ok_or_else(|| anyhow::anyhow!("group object {object} is not active with the parameters of {ia}"))?;
-    let label = [obj.text.as_str(), obj.function_text.as_str()]
+    let (text, function_text, datapoint_type) =
+        match image.active_group_objects.iter().find(|(a, _)| *a == object) {
+            Some((_, obj)) => (obj.text.clone(), obj.function_text.clone(), obj.datapoint_type.clone()),
+            None if force => {
+                // the base definition, without the overrides of the
+                // dynamic section that would apply if it were active
+                let co = ap
+                    .static_
+                    .iter()
+                    .flat_map(|s| {
+                        s.com_object_table
+                            .iter()
+                            .flat_map(|t| t.items.iter())
+                            .chain(s.com_objects.iter().flat_map(|c| c.items.iter()))
+                    })
+                    .find(|c| c.number.trim().parse::<u16>().ok() == Some(object))
+                    .ok_or_else(|| anyhow::anyhow!("{} has no group object {object}", ap.id))?;
+                eprintln!("note: group object {object} is not active with the parameters of {ia}");
+                (co.text.clone(), co.function_text.clone(), co.datapoint_type.clone())
+            }
+            None => bail!(
+                "group object {object} is not active with the parameters of {ia} (--force reads it anyway)"
+            ),
+        };
+    let label = [text.as_str(), function_text.as_str()]
         .iter()
         .filter(|t| !t.is_empty())
         .copied()
@@ -1779,7 +1804,7 @@ fn cmd_go_mem_read(
         ia,
         object,
         &entry,
-        &bus::ObjectInfo { label, datapoint_type: obj.datapoint_type.clone(), application: ap.id.clone() },
+        &bus::ObjectInfo { label, datapoint_type, application: ap.id.clone() },
     )
 }
 

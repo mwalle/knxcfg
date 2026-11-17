@@ -136,7 +136,7 @@ knxcfg read <ia> [--save] [-i ...]             # read the configuration back fro
 knxcfg mem-read <ia> <addr> <count> [-i ...]   # hex dump; addr 0x4000 / 4000h / decimal
 knxcfg prog-ia <ia> [--serial SN] [--wait S] [-i ...]  # assign IA: programming mode, or by serial (0083:12345678)
 knxcfg go-read <ia> <object> [-i ...]          # GO value/status/config via PID_GO_DIAGNOSTICS (optional in devices)
-knxcfg go-mem-read <ia> <object> [-i ...]      # System 7: GO value + RAM flags at the knxprod's data pointer
+knxcfg go-mem-read <ia> <object> [--force] [-i ...]  # System 7: GO value + RAM flags at the knxprod's data pointer; --force also inactive objects
 ```
 Bus commands use `--interface` (a `/dev/hidrawN` path or a KNXnet/IP server
 address, `192.168.77.1[:3671]`) or the only KNX `hidraw` device. `/dev/hidraw*`
